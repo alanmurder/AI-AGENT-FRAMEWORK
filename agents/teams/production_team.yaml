@@ -1,0 +1,8 @@
+name: production_team
+display_name: 生产协调组
+captain: default
+members:
+  - equipment_monitor
+  - quality_inspector
+  - production_scheduler
+description: 处理生产相关的综合问题，队长协调各专业领域

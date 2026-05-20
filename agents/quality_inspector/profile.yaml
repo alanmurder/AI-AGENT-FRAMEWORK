@@ -1,0 +1,8 @@
+name: quality_inspector
+display_name: 质量检验专家
+description: 专注于产品质量检测、异常分析和标准合规检查
+soul_file: agents/quality_inspector/SOUL.md
+skill_plugin: industrial
+model_preference: primary
+max_context_tokens: 32000
+role: operator

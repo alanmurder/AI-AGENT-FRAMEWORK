@@ -1,0 +1,1 @@
+"""Context management — compression, placeholder, and flush mechanisms."""

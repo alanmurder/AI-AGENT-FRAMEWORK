@@ -1,0 +1,1 @@
+"""Memory subsystem — long-term, short-term, and manager coordination."""

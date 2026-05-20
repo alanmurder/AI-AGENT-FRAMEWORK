@@ -1,0 +1,1 @@
+"""Middleware subsystem — before/after/wrap hooks for agent processing."""

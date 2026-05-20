@@ -1,0 +1,26 @@
+# Runtime data (memory, users, sessions)
+data/
+
+# Secrets
+.env
+
+# Claude
+.claude/
+.superpowers/
+docs/superpowers/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+.pytest_cache/
+
+# Frontend
+web/node_modules/
+web/dist/
+web/.vitest/
+
+# IDE
+.vscode/
+.idea/

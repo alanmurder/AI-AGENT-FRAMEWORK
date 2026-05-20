@@ -1,0 +1,8 @@
+name: equipment_monitor
+display_name: 设备巡检专家
+description: 专注于工业设备的巡检、故障诊断和维护建议
+soul_file: agents/equipment_monitor/SOUL.md
+skill_plugin: industrial
+model_preference: primary
+max_context_tokens: 32000
+role: operator

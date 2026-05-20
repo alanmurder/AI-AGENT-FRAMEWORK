@@ -1,0 +1,1 @@
+"""Harness layer — middleware, security, memory, and skill subsystems."""

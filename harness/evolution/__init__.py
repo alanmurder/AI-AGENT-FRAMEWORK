@@ -1,0 +1,1 @@
+"""Evolution subsystem — three-agent verification, GEPA optimization, auto-evolution."""

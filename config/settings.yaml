@@ -1,0 +1,151 @@
+# AI Agent Platform - Main Configuration
+# This YAML is the single source of truth for all runtime settings.
+
+agent:
+  model:
+    primary:
+      provider: deepseek
+      model: deepseek-chat
+      temperature: 0.1
+      max_tokens: 4096
+    fallback:
+      - provider: openai
+        model: gpt-4o
+      - provider: anthropic
+        model: claude-sonnet-4-6
+
+  context:
+    max_tokens: 64000
+    compression_threshold: 4000
+    flush_threshold: 60000
+    max_flush_per_session: 1
+    placeholder_threshold: 2000
+    keep_recent_messages: 20
+
+gateway:
+  host: "0.0.0.0"
+  port: 8000
+  workers: 4
+
+memory:
+  base_dir: "data/workspace"
+  long_term:
+    bootstrap_files:
+      - SOUL.md
+      - USER.md
+      - MEMORY.md
+    max_memory_tokens: 2000
+  short_term:
+    redis_url: "redis://localhost:6379/0"
+    session_ttl: 3600
+  mid_term:
+    pg_host: "localhost"
+    pg_port: 5432
+    pg_database: "ai_agent_platform"
+    pg_user: "ai_agent"
+    pg_password: ""
+    pg_pool_min_size: 2
+    pg_pool_max_size: 10
+    retention_days: 30
+    search_top_k: 5
+
+security:
+  auth:
+    jwt_secret: "change-this-in-production"
+    jwt_algorithm: "HS256"
+    jwt_expire_minutes: 480
+  approval:
+    levels:
+      - L0  # string match
+      - L1  # regex match
+      - L2  # whitelist
+      - L3  # LLM review (Phase 2)
+      - L4  # Human-in-the-loop (Phase 2)
+    l0_blacklist:
+      - "rm -rf"
+      - "DROP TABLE"
+      - "DELETE FROM"
+      - "TRUNCATE"
+      - "sudo"
+      - "chmod 777"
+      - "passwd"
+      - "shadow"
+      - "eval("
+      - "exec("
+      - "__import__"
+      - "subprocess.call"
+      - "os.system"
+    l1_patterns:
+      - pattern: "\\$\\([^)]*\\)"
+        description: "command substitution $()"
+      - pattern: "`[^`]*`"
+        description: "backtick command substitution"
+      - pattern: "\\|\\|"
+        description: "OR pipe chain"
+      - pattern: "&&"
+        description: "AND command chain"
+      - pattern: ";\\s*[a-zA-Z_]"
+        description: "command separator"
+      - pattern: ">\\s*/dev/"
+        description: "redirect to /dev"
+      - pattern: "wget\\s+.*\\s*-\\s*O\\s+/(?:etc|bin|usr)"
+        description: "download to system directory"
+      - pattern: "curl\\s+.*\\s*-\\s*o\\s+/(?:etc|bin|usr)"
+        description: "download to system directory"
+    l2_safe_commands:
+      command_exec:
+        - ls
+        - cat
+        - head
+        - tail
+        - grep
+        - find
+        - wc
+        - sort
+        - uniq
+        - echo
+        - date
+        - pwd
+        - whoami
+        - df
+        - du
+        - ps
+        - top
+        - python
+        - python3
+        - pip
+        - node
+        - npm
+        - git
+        - docker ps
+        - jq
+        - awk
+        - sed
+      query_database:
+        - SELECT
+
+skill:
+  manifest_max_tokens: 200
+  builtin_dirs:
+    - skills/builtin
+  extension_dirs:
+    - skills/extensions
+
+rbac:
+  roles:
+    admin:
+      tools: [file_read, file_write, command_exec, web_search, query_database, send_notification, memory_manage]
+      skill_access: "all"
+      approval_level: L3
+    manager:
+      tools: [file_read, file_write, web_search, query_database, send_notification, memory_manage]
+      skill_access: "enterprise"
+      approval_level: L3
+    operator:
+      tools: [file_read, web_search, query_database, send_notification, memory_manage]
+      skill_access: "production"
+      approval_level: L3
+    viewer:
+      tools: [file_read, web_search, query_database, memory_manage]
+      skill_access: "report"
+      approval_level: L2

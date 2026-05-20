@@ -1,0 +1,1 @@
+"""Agent runtime — configuration, models, tools, and context schema."""

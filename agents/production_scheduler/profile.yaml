@@ -1,0 +1,8 @@
+name: production_scheduler
+display_name: 生产调度专家
+description: 专注于生产排程优化、资源调度和瓶颈分析
+soul_file: agents/production_scheduler/SOUL.md
+skill_plugin: industrial
+model_preference: primary
+max_context_tokens: 32000
+role: manager

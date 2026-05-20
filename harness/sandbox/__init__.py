@@ -1,0 +1,1 @@
+"""Sandbox subsystem — Docker container isolation for command execution."""

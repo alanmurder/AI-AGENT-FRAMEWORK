@@ -1,0 +1,1 @@
+"""Skill subsystem — manifest generation, loading, and management."""

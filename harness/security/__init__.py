@@ -1,0 +1,1 @@
+"""Security subsystem — authentication, approval, and RBAC."""
