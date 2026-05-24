@@ -6,6 +6,8 @@ import BackgroundTasks from '../components/BackgroundTasks';
 import MemoryViewer from '../components/MemoryViewer';
 import TeamStatus from '../components/TeamStatus';
 import RoleGuard from '../components/RoleGuard';
+import ExpertAgentManager from './ExpertAgentManager';
+import MCPServerManager from './MCPServerManager';
 
 export default function AdminPanel() {
   const tabItems = [
@@ -15,6 +17,8 @@ export default function AdminPanel() {
     { key: 'background', label: '后台任务', children: <BackgroundTasks /> },
     { key: 'memory', label: '记忆文件', children: <MemoryViewer /> },
     { key: 'teams', label: '团队状态', children: <RoleGuard roles={['admin', 'manager']}><TeamStatus /></RoleGuard> },
+    { key: 'mcp', label: 'MCP服务', children: <RoleGuard roles={['admin']}><MCPServerManager /></RoleGuard> },
+    { key: 'expert-agents', label: '专家智能体管理', children: <RoleGuard roles={['admin']}><ExpertAgentManager /></RoleGuard> },
   ];
 
   return <Tabs items={tabItems} />;

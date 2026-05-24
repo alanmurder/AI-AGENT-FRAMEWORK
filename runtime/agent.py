@@ -36,10 +36,12 @@ def create_agent_for_user(
     skill_manager: SkillManager,
     approval_checker: ApprovalChecker,
     sandbox_runner: SandboxRunner | None = None,
+    mcp_manager=None,
 ):
     """Create a configured agent instance for a specific user.
 
     Admin/Manager roles get captain team tools when team_enabled.
+    MCP tools are added based on the user's role.
     """
     from langchain.agents import create_agent
 
@@ -48,11 +50,18 @@ def create_agent_for_user(
 
     # Select tools based on user role and team config
     if user_ctx.role in CAPTAIN_CAPABLE_ROLES and config.team_enabled:
-        tools = CAPTAIN_TOOLS
+        tools = list(CAPTAIN_TOOLS)
     elif user_ctx.role in SUBAGENT_CAPABLE_ROLES:
-        tools = ALL_TOOLS
+        tools = list(ALL_TOOLS)
     else:
-        tools = BASE_TOOLS
+        tools = list(BASE_TOOLS)
+
+    # Add MCP tools for the user's role
+    if mcp_manager:
+        from harness.security.rbac import get_role_mcp_tool_access
+        role_mcp_access = get_role_mcp_tool_access()
+        mcp_tools = mcp_manager.get_tools_for_role(user_ctx.role, role_mcp_access)
+        tools.extend(mcp_tools)
 
     context_config = build_context_config(config)
     compressor = ContextCompressor(context_config, mini_model)

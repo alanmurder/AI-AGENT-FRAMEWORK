@@ -123,3 +123,65 @@ export interface SessionMessage {
   tool_call_id?: string;
   name?: string;
 }
+
+// MCP types
+export interface MCPServerConfig {
+  name: string;
+  transport: 'stdio' | 'sse';
+  command?: string;
+  args?: string[];
+  url?: string;
+  enabled: boolean;
+  env?: Record<string, string>;
+}
+
+export interface MCPToolInfo {
+  server_name: string;
+  tool_name: string;
+  full_name: string;
+  description: string;
+}
+
+export interface MCPServerDetail {
+  config: MCPServerConfig;
+  tools: MCPToolInfo[];
+}
+
+// Expert agent CRUD types
+export interface CreateAgentRequest {
+  name: string;
+  display_name: string;
+  description: string;
+  soul_content: string;
+  role: UserRole;
+  skills: string[];
+  mcp_tools: string[];
+  model_preference?: string;
+  max_context_tokens?: number;
+}
+
+export interface UpdateAgentRequest {
+  display_name?: string;
+  description?: string;
+  soul_content?: string;
+  role?: UserRole;
+  skills?: string[];
+  mcp_tools?: string[];
+  model_preference?: string;
+  max_context_tokens?: number;
+}
+
+export interface RoleSkillInfo {
+  name: string;
+  description: string;
+  access: string;
+  allowed: boolean;
+}
+
+export interface RoleMCPToolInfo {
+  name: string;
+  server_name: string;
+  tool_name: string;
+  description: string;
+  allowed: boolean;
+}

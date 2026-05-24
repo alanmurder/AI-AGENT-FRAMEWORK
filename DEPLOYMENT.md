@@ -309,6 +309,10 @@ AI_AGENT_LOG_LEVEL=INFO             # DEBUG | INFO | WARNING | ERROR
 # 沙箱（如不需要执行任意命令，关闭以保安全）
 AI_AGENT_SANDBOX_ENABLED=false
 
+# MCP 服务器（通过 Web UI 管理面板配置，admin 权限）
+# 服务端配置存储在 data/mcp_servers.json
+# 支持 stdio 和 SSE 两种传输方式
+
 # PostgreSQL 中期记忆（Phase 2）
 PG_HOST=localhost
 PG_PORT=5432

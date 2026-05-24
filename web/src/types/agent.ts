@@ -7,6 +7,12 @@ export interface AgentProfile {
   soul_file?: string;
   model_preference?: string;
   max_context_tokens?: number;
+  skills: string[];
+  mcp_tools: string[];
+  source: string;
+  created_by?: string;
+  created_at?: string;
+  updated_at?: string;
 }
 
 export interface TeamConfig {

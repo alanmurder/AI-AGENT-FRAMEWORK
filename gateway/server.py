@@ -68,6 +68,7 @@ approval_checker = ApprovalChecker(mini_model=create_mini_model(config))
 router = GatewayRouter()
 expert_registry = AgentRegistry()
 expert_registry.scan_profiles(Path(config.project_root) / "agents")
+expert_registry.scan_api_profiles(Path(config.project_root))
 session_mgr = SessionManager()
 web_adapter = WebAdapter()
 session_persistence = SessionPersistence(config.get_memory_base_dir())
@@ -77,6 +78,12 @@ lane_queue = LaneQueue()
 dingtalk_adapter = DingTalkAdapter()
 sandbox_runner = SandboxRunner()
 background_manager = BackgroundTaskManager(config, memory_manager, skill_manager, approval_checker, sandbox_runner)
+
+# MCP manager
+from harness.mcp.manager import MCPManager
+from harness.middleware.tool_filter import set_mcp_manager
+mcp_manager = MCPManager(Path(config.project_root))
+set_mcp_manager(mcp_manager)
 
 
 def authenticate_user(api_key: str = None, token: str = None) -> UserContext:
@@ -96,9 +103,21 @@ def authenticate_user(api_key: str = None, token: str = None) -> UserContext:
     raise HTTPException(status_code=401, detail="Invalid or missing authentication")
 
 
+def require_admin(authorization: str = Header(default=None)) -> UserContext:
+    """Authenticate and verify admin role. Raises 401/403 if not."""
+    auth_header = authorization or ""
+    token = auth_header.replace("Bearer ", "") if auth_header.startswith("Bearer ") else ""
+    api_key = auth_header if not auth_header.startswith("Bearer ") else ""
+    user_ctx = authenticate_user(api_key=api_key, token=token)
+    if user_ctx.role != UserRole.ADMIN:
+        raise HTTPException(status_code=403, detail="Only admin can perform this action")
+    return user_ctx
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("gateway_starting", host=config.gateway_host, port=config.gateway_port)
+    await mcp_manager.initialize()
     await memory_manager.connect_mid_term()
     heartbeat_scheduler.start()
     cron_scheduler.start()
@@ -109,6 +128,7 @@ async def lifespan(app: FastAPI):
     cron_scheduler.stop()
     await background_manager.stop_worker()
     await memory_manager.disconnect_mid_term()
+    await mcp_manager.shutdown()
     logger.info("gateway_stopping")
 
 
@@ -171,7 +191,7 @@ async def chat(request: ChatRequest, authorization: str = Header(default=None)):
         memory_manager.init_user(user_ctx.user_id)
 
         # Create agent and invoke — one agent per request for REST
-        agent = create_agent_for_user(user_ctx, config, memory_manager, skill_manager, approval_checker, sandbox_runner)
+        agent = create_agent_for_user(user_ctx, config, memory_manager, skill_manager, approval_checker, sandbox_runner, mcp_manager=mcp_manager)
         result = agent.invoke(
             {"messages": [{"role": "user", "content": request.content}]},
             config={"configurable": {"context": user_ctx}},
@@ -481,6 +501,7 @@ async def chat_with_expert(name: str, request: ExpertChatRequest, authorization:
     agent = create_expert_agent(
         profile, soul_content, user_ctx, config,
         memory_manager, skill_manager, approval_checker, sandbox_runner,
+        mcp_manager=mcp_manager,
     )
 
     session_key = session_mgr.create_session_key(ChannelType.WEB, user_ctx.user_id, expert_id=name)
@@ -535,6 +556,330 @@ async def get_expert_tasks(name: str, user_id: str = "default"):
             for t in tasks
         ],
     }
+
+
+# --- MCP Server Management API (admin only) ---
+
+
+class MCPServerRequest(BaseModel):
+    name: str
+    transport: str = "stdio"
+    command: str = ""
+    args: list[str] = []
+    url: str = ""
+    enabled: bool = True
+    env: dict[str, str] = {}
+
+
+@app.get("/api/mcp/servers")
+async def list_mcp_servers():
+    """List all configured MCP servers."""
+    servers = mcp_manager.list_servers()
+    return {
+        "servers": [
+            {"name": s.name, "transport": s.transport, "command": s.command,
+             "args": s.args, "url": s.url, "enabled": s.enabled}
+            for s in servers
+        ]
+    }
+
+
+@app.get("/api/mcp/servers/{name}")
+async def get_mcp_server(name: str):
+    """Get MCP server details and discovered tools."""
+    config = mcp_manager.get_server(name)
+    if not config:
+        raise HTTPException(status_code=404, detail=f"MCP server '{name}' not found")
+    tools = mcp_manager.get_server_tools(name)
+    return {
+        "config": {"name": config.name, "transport": config.transport, "command": config.command,
+                   "args": config.args, "url": config.url, "enabled": config.enabled},
+        "tools": [{"server_name": t.server_name, "tool_name": t.tool_name, "description": t.description} for t in tools],
+    }
+
+
+@app.post("/api/mcp/servers")
+async def create_mcp_server(req: MCPServerRequest, authorization: str = Header(default=None)):
+    """Create a new MCP server configuration (admin only)."""
+    require_admin(authorization)
+
+    from harness.mcp.types import MCPServerConfig
+    cfg = MCPServerConfig(
+        name=req.name, transport=req.transport, command=req.command,
+        args=req.args, url=req.url, enabled=req.enabled, env=req.env,
+    )
+    await mcp_manager.add_server(cfg)
+    return {"message": f"MCP server '{req.name}' created", "name": req.name}
+
+
+@app.put("/api/mcp/servers/{name}")
+async def update_mcp_server(name: str, req: MCPServerRequest, authorization: str = Header(default=None)):
+    """Update an MCP server configuration (admin only)."""
+    require_admin(authorization)
+
+    existing = mcp_manager.get_server(name)
+    if not existing:
+        raise HTTPException(status_code=404, detail=f"MCP server '{name}' not found")
+
+    from harness.mcp.types import MCPServerConfig
+    cfg = MCPServerConfig(
+        name=name, transport=req.transport, command=req.command,
+        args=req.args, url=req.url, enabled=req.enabled, env=req.env,
+    )
+    await mcp_manager.remove_server(name)
+    await mcp_manager.add_server(cfg)
+    return {"message": f"MCP server '{name}' updated", "name": name}
+
+
+@app.delete("/api/mcp/servers/{name}")
+async def delete_mcp_server(name: str, authorization: str = Header(default=None)):
+    """Delete an MCP server configuration (admin only)."""
+    require_admin(authorization)
+    removed = await mcp_manager.remove_server(name)
+    if not removed:
+        raise HTTPException(status_code=404, detail=f"MCP server '{name}' not found")
+    return {"deleted": name}
+
+
+@app.post("/api/mcp/servers/{name}/connect")
+async def connect_mcp_server(name: str, authorization: str = Header(default=None)):
+    """Connect/reconnect to an MCP server (admin only)."""
+    require_admin(authorization)
+    tools = await mcp_manager.connect_server(name)
+    return {"status": "connected", "server": name, "tools": len(tools)}
+
+
+@app.post("/api/mcp/servers/{name}/disconnect")
+async def disconnect_mcp_server(name: str, authorization: str = Header(default=None)):
+    """Disconnect from an MCP server (admin only)."""
+    require_admin(authorization)
+    await mcp_manager.disconnect_server(name)
+    return {"status": "disconnected", "server": name}
+
+
+@app.get("/api/mcp/tools")
+async def list_mcp_tools(role: str = ""):
+    """List all discovered MCP tools, optionally filtered by role."""
+    all_tools = mcp_manager.get_all_tools_info()
+    if role:
+        from runtime.context_schema import UserRole
+        from harness.security.rbac import get_role_mcp_tool_access
+        allowed = get_role_mcp_tool_access().get(UserRole(role), [])
+        # Admin wildcard: show all
+        if "*" not in allowed:
+            all_tools = [t for t in all_tools if t.full_name in allowed or any(
+                p.endswith(":*") and t.full_name.startswith(p[:-2] + ":") for p in allowed
+            )]
+    return {
+        "tools": [{"server_name": t.server_name, "tool_name": t.tool_name, "full_name": t.full_name,
+                    "description": t.description} for t in all_tools]
+    }
+
+
+# --- Expert Agent CRUD API (admin only) ---
+
+
+class CreateAgentRequest(BaseModel):
+    name: str
+    display_name: str
+    description: str
+    soul_content: str = ""
+    role: str = "operator"
+    skills: list[str] = []
+    mcp_tools: list[str] = []
+    model_preference: str = "primary"
+    max_context_tokens: int = 32000
+
+
+class UpdateAgentRequest(BaseModel):
+    display_name: str | None = None
+    description: str | None = None
+    soul_content: str | None = None
+    role: str | None = None
+    skills: list[str] | None = None
+    mcp_tools: list[str] | None = None
+    model_preference: str | None = None
+    max_context_tokens: int | None = None
+
+
+@app.get("/api/agents/manage")
+async def list_manageable_agents(authorization: str = Header(default=None)):
+    """List all expert agents (file-based and API-created). Admin only."""
+    require_admin(authorization)
+    return {
+        "agents": [
+            {
+                "name": p.name, "display_name": p.display_name, "description": p.description,
+                "role": p.role, "skill_plugin": p.skill_plugin, "model_preference": p.model_preference,
+                "max_context_tokens": p.max_context_tokens, "skills": p.skills, "mcp_tools": p.mcp_tools,
+                "source": p.source, "created_by": p.created_by, "created_at": p.created_at, "updated_at": p.updated_at,
+            }
+            for p in expert_registry.list_profiles()
+        ]
+    }
+
+
+@app.post("/api/agents/manage")
+async def create_agent(req: CreateAgentRequest, authorization: str = Header(default=None)):
+    """Create a new expert agent (admin only)."""
+    user_ctx = require_admin(authorization)
+
+    # Validate name uniqueness
+    if expert_registry.get(req.name):
+        raise HTTPException(status_code=409, detail=f"Agent '{req.name}' already exists")
+
+    # Validate skills and MCP tools against role
+    from harness.expert.validator import ExpertAgentValidator
+    valid_skills = ExpertAgentValidator.validate_skills_from_profile(req.role, req.skills)
+    valid_mcp = ExpertAgentValidator.validate_mcp_tools_from_profile(req.role, req.mcp_tools)
+
+    # Save SOUL.md
+    soul_path = expert_registry.store.save_soul(req.name, req.soul_content)
+
+    # Build and save profile
+    profile = AgentProfile(
+        name=req.name,
+        display_name=req.display_name,
+        description=req.description,
+        soul_file=str(soul_path),
+        role=req.role,
+        skills=valid_skills,
+        mcp_tools=valid_mcp,
+        model_preference=req.model_preference,
+        max_context_tokens=req.max_context_tokens,
+        source="api",
+        created_by=user_ctx.user_id,
+    )
+    expert_registry.store.save(profile)
+    expert_registry.register(profile)
+
+    logger.info("expert_agent_created", name=req.name, role=req.role, skills=len(valid_skills), mcp_tools=len(valid_mcp), by=user_ctx.user_id)
+    return {"message": f"Agent '{req.name}' created", "agent": profile.model_dump()}
+
+
+@app.get("/api/agents/manage/{name}")
+async def get_agent(name: str, authorization: str = Header(default=None)):
+    """Get expert agent details. Admin only."""
+    require_admin(authorization)
+    profile = expert_registry.get(name)
+    if not profile:
+        raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
+
+    root = Path(config.project_root)
+    soul_content = expert_registry.load_soul_content(name, root)
+    return {"agent": profile.model_dump(), "soul_content": soul_content}
+
+
+@app.put("/api/agents/manage/{name}")
+async def update_agent(name: str, req: UpdateAgentRequest, authorization: str = Header(default=None)):
+    """Update an expert agent (admin only, API-created only)."""
+    user_ctx = require_admin(authorization)
+    profile = expert_registry.get(name)
+    if not profile:
+        raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
+    if profile.source == "file":
+        raise HTTPException(status_code=403, detail="Cannot modify file-based agents. Edit the profile.yaml directly.")
+
+    # Update fields
+    if req.display_name is not None:
+        profile.display_name = req.display_name
+    if req.description is not None:
+        profile.description = req.description
+    if req.role is not None:
+        profile.role = req.role
+    if req.skills is not None:
+        from harness.expert.validator import ExpertAgentValidator
+        profile.skills = ExpertAgentValidator.validate_skills_from_profile(profile.role, req.skills)
+    if req.mcp_tools is not None:
+        from harness.expert.validator import ExpertAgentValidator
+        profile.mcp_tools = ExpertAgentValidator.validate_mcp_tools_from_profile(profile.role, req.mcp_tools)
+    if req.model_preference is not None:
+        profile.model_preference = req.model_preference
+    if req.max_context_tokens is not None:
+        profile.max_context_tokens = req.max_context_tokens
+
+    if req.soul_content is not None:
+        expert_registry.store.save_soul(name, req.soul_content)
+        profile.soul_file = str(expert_registry.store.get_soul_path(name))
+
+    profile.updated_at = ""
+    expert_registry.store.save(profile)
+    expert_registry.register(profile)
+
+    logger.info("expert_agent_updated", name=name, by=user_ctx.user_id)
+    return {"message": f"Agent '{name}' updated", "agent": profile.model_dump()}
+
+
+@app.delete("/api/agents/manage/{name}")
+async def delete_agent(name: str, authorization: str = Header(default=None)):
+    """Delete an expert agent (admin only, API-created only)."""
+    user_ctx = require_admin(authorization)
+    profile = expert_registry.get(name)
+    if not profile:
+        raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
+    if profile.source == "file":
+        raise HTTPException(status_code=403, detail="Cannot delete file-based agents. Remove the profile.yaml directly.")
+
+    expert_registry.store.delete(name)
+    expert_registry.unregister(name)
+    logger.info("expert_agent_deleted", name=name, by=user_ctx.user_id)
+    return {"deleted": name}
+
+
+# --- Role-filtered Skill and MCP Tool listing ---
+
+
+@app.get("/api/roles/{role}/skills")
+async def get_role_skills(role: str):
+    """List skills available for a specific role (used in agent creation form)."""
+    from harness.skill.types import SkillAccess
+    max_level = SkillAccess.max_for_role(role)
+    all_skills = skill_manager.generate_manifest()
+    # Get skill info with access levels
+    skill_list = skill_manager.list_skills() if hasattr(skill_manager, 'list_skills') else []
+    result = []
+    for skill in skill_list:
+        if hasattr(skill, 'access') and hasattr(skill.access, 'level'):
+            allowed = skill.access.level <= max_level
+        else:
+            allowed = True
+        result.append({
+            "name": skill.name if hasattr(skill, 'name') else str(skill),
+            "description": skill.description if hasattr(skill, 'description') else "",
+            "access": skill.access.value if hasattr(skill, 'access') else "unknown",
+            "allowed": allowed,
+        })
+    return {"role": role, "skill_access": ExpertAgentValidator.get_role_skill_level(role), "skills": result}
+
+
+@app.get("/api/roles/{role}/mcp-tools")
+async def get_role_mcp_tools(role: str):
+    """List MCP tools available for a specific role (used in agent creation form)."""
+    from runtime.context_schema import UserRole
+    from harness.expert.validator import ExpertAgentValidator
+    try:
+        role_enum = UserRole(role)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Invalid role: {role}")
+
+    allowed = ExpertAgentValidator.get_role_mcp_tools(role)
+    all_tools = mcp_manager.get_all_tools_info()
+
+    result = []
+    for tool in all_tools:
+        tool_allowed = "*" in allowed or tool.full_name in allowed or any(
+            p.endswith(":") and tool.full_name.startswith(p) for p in allowed
+        ) or any(
+            p.endswith(":*") and tool.full_name.startswith(p[:-2] + ":") for p in allowed
+        )
+        result.append({
+            "name": tool.full_name,
+            "server_name": tool.server_name,
+            "tool_name": tool.tool_name,
+            "description": tool.description,
+            "allowed": tool_allowed,
+        })
+    return {"role": role, "mcp_tools": result}
 
 
 # --- Evolution & Plugin API (Phase 3) ---
@@ -735,7 +1080,7 @@ async def dingtalk_callback(request: dict):
     await lane_queue.acquire(session_key)
     try:
         memory_manager.init_user(user_ctx.user_id)
-        agent = create_agent_for_user(user_ctx, config, memory_manager, skill_manager, approval_checker, sandbox_runner)
+        agent = create_agent_for_user(user_ctx, config, memory_manager, skill_manager, approval_checker, sandbox_runner, mcp_manager=mcp_manager)
         result = agent.invoke(
             {"messages": [{"role": "user", "content": std_msg.content}]},
             config={"configurable": {"context": user_ctx}},
@@ -807,7 +1152,7 @@ async def ws_chat(websocket: WebSocket):
             )
             logger.info("agent_created", agent_type="expert", agent_id=agent_id, user_id=user_id, session_id=user_ctx.session_id)
         else:
-            agent = create_agent_for_user(user_ctx, config, memory_manager, skill_manager, approval_checker, sandbox_runner)
+            agent = create_agent_for_user(user_ctx, config, memory_manager, skill_manager, approval_checker, sandbox_runner, mcp_manager=mcp_manager)
             logger.info("agent_created", agent_type="generic", user_id=user_id, session_id=user_ctx.session_id)
 
         # Send session info

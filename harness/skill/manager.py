@@ -47,7 +47,7 @@ class SkillManager:
                     return path.read_text(encoding="utf-8")
         return None
 
-    def list_skills(self) -> list[dict]:
-        """List all skills as dicts (name + description)."""
+    def list_skills(self) -> list:
+        """List all skills as SkillInfo objects (with access levels)."""
         manifest = self.get_manifest()
-        return [{"name": s.name, "description": s.description} for s in manifest.skills]
+        return manifest.skills

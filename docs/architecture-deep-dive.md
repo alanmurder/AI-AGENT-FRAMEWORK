@@ -20,6 +20,7 @@
   - [3.9 Team — 智能体团队](#39-team--智能体团队)
   - [3.10 Sandbox — 沙箱执行](#310-sandbox--沙箱执行)
   - [3.11 Scheduler — 定时调度](#311-scheduler--定时调度)
+  - [3.12 MCP — 外部工具集成](#312-mcp--外部工具集成)
 - [L4 Agent Runtime — 智能体运行时](#l4-agent-runtime--智能体运行时)
 - [L5 LLM Provider — 模型接入层](#l5-llm-provider--模型接入层)
 - [L6 Infrastructure — 基础设施层](#l6-infrastructure--基础设施层)
@@ -94,9 +95,18 @@ class StandardMessage:
 | `/ws/chat` | WebSocket | JWT | 流式对话 |
 | `/api/agents` | GET | JWT | 专家智能体列表 |
 | `/api/agents/{name}/chat` | POST | JWT | 专家对话 |
+| `/api/agents/manage` | GET/POST | admin | 专家智能体 CRUD |
+| `/api/agents/manage/{name}` | GET/PUT/DELETE | admin | 单个智能体管理 |
 | `/api/skills` | GET | JWT | 技能清单 |
 | `/api/skills/verify` | POST | admin/manager | 三 Agent 验证 |
 | `/api/skills/optimize/{name}` | POST | admin/manager | GEPA 优化 |
+| `/api/mcp/servers` | GET/POST | admin | MCP 服务端管理 |
+| `/api/mcp/servers/{name}` | PUT/DELETE | admin | 单个 MCP 服务端 |
+| `/api/mcp/servers/{name}/connect` | POST | admin | 连接 MCP 服务端 |
+| `/api/mcp/servers/{name}/disconnect` | POST | admin | 断开 MCP 服务端 |
+| `/api/mcp/tools` | GET | 无 | 已发现 MCP 工具 |
+| `/api/roles/{role}/skills` | GET | 无 | 角色可用 Skill |
+| `/api/roles/{role}/mcp-tools` | GET | 无 | 角色可用 MCP 工具 |
 | `/api/memory/{user_id}` | GET | JWT | 读取记忆文件 |
 | `/api/sessions/{user_id}` | GET | JWT | 会话列表 |
 | `/api/sessions/{user_id}/{session_id}` | GET | JWT | 会话消息回放 |
@@ -540,49 +550,83 @@ Evaluator Agent (评估)
 
 ### 3.8 Expert — 专家智能体
 
-**职责：** 创建具有专属人格（SOUL.md）和技能插件（Skill Plugin）的专业智能体。
+**职责：** 创建具有专属人格（SOUL.md）、Skill 列表、MCP 工具列表和角色权限的专业智能体。支持文件系统预置（YAML）和 API 动态管理（JSON）两种方式。
 
 #### 关键文件
 
 | 文件 | 作用 |
 |------|------|
-| `harness/expert/registry.py` | `AgentRegistry` — 扫描/注册/查询专家 |
-| `harness/expert/agent_factory.py` | `create_expert_agent()` — 专家智能体工厂 |
-| `harness/expert/types.py` | `AgentProfile` — 专家配置模型 |
+| `harness/expert/registry.py` | `AgentRegistry` — 扫描/注册/查询专家（合并文件+API来源） |
+| `harness/expert/agent_factory.py` | `create_expert_agent()` / `create_expert_agent_for_user()` — 专家智能体工厂 |
+| `harness/expert/store.py` | `ExpertAgentStore` — API 创建的智能体 JSON 存储 |
+| `harness/expert/validator.py` | `ExpertAgentValidator` — 权限越级防护校验 |
+| `harness/expert/types.py` | `AgentProfile` — 专家配置模型（含 skills/mcp_tools） |
 
-#### AgentProfile (YAML)
-
-```yaml
-# agents/equipment_monitor/profile.yaml
-name: equipment_monitor
-display_name: 设备巡检专家
-description: 专注于工业设备的巡检、故障诊断和维护建议
-role: operator
-skill_plugin: industrial
-model_preference: primary
-```
-
-#### create_expert_agent 流程
+#### AgentProfile (完整模型)
 
 ```python
-def create_expert_agent(profile, soul_content, user_ctx, config, ...):
-    model = create_primary_model(config) if profile.model_preference == "primary" else create_mini_model(config)
-    tools = BASE_TOOLS   # 专家智能体固定使用基础工具集
-    
-    # 系统提示 = SOUL.md 人格 + Skill Plugin 指令
-    system_prompt = soul_content + skill_manager.get_plugin_instructions(profile.skill_plugin)
-    
-    agent = create_agent(model, tools, system_prompt, middleware=[...])
+class AgentProfile(BaseModel):
+    name: str
+    display_name: str
+    description: str
+    soul_file: str
+    skill_plugin: str = ""
+    model_preference: str = "primary"
+    max_context_tokens: int = 32000
+    role: str = "operator"
+    skills: list[str] = []       # Skill 名称列表
+    mcp_tools: list[str] = []    # MCP 工具 (server:tool 格式)
+    source: str = "file"         # "file" | "api"
+    created_by: str = ""
+    created_at: str = ""
+    updated_at: str = ""
+```
+
+#### create_expert_agent_for_user 流程
+
+```python
+def create_expert_agent_for_user(profile, user_ctx, ...):
+    # 1. 使用专家配置的角色 (而非调用用户角色)
+    agent_role = UserRole(profile.role)
+    expert_ctx = UserContext(..., role=agent_role, agent_id=profile.name)
+
+    # 2. 加载 SOUL.md 人格
+    soul = registry.load_soul_content(profile.name, root)
+
+    # 3. 工具 = BASE_TOOLS + profile.mcp_tools 允许的 MCP 工具
+    tools = list(BASE_TOOLS)
+    if mcp_manager and profile.mcp_tools:
+        role_mcp_access = get_role_mcp_tool_access()
+        mcp_tools = mcp_manager.get_tools_for_role(agent_role, role_mcp_access)
+        tools.extend([t for t in mcp_tools if full_name in profile.mcp_tools])
+
+    # 4. 构建 Agent
+    agent = create_agent(model, tools, system_prompt=soul, middleware=[...])
     return agent
 ```
 
-#### Agent Registry
+#### 双来源 Registry
 
 ```
-启动时: AgentRegistry.scan_profiles(root / "agents")
-  → 遍历 agents/*/ 目录
-    → 解析 profile.yaml → AgentProfile
-      → 注册到内存 dict {name: profile}
+启动时:
+  1. AgentRegistry.scan_profiles(root / "agents")
+     → 遍历 agents/*/profile.yaml → 解析 YAML → source="file" (只读)
+  2. AgentRegistry.scan_api_profiles(root)
+     → 遍历 data/agents/*.json → 解析 JSON → source="api" (可读写)
+     → API 来源优先级高于文件来源
+```
+
+#### 权限校验 (ExpertAgentValidator)
+
+```
+创建/更新专家智能体时:
+  1. validate_skills_from_profile(role, skills) → 过滤越权 Skill
+     - 获取角色最大 SkillAccess level
+     - 仅保留 access.level ≤ max_level 的 Skill
+  2. validate_mcp_tools_from_profile(role, mcp_tools) → 过滤越权 MCP 工具
+     - 获取角色的 mcp_tools 允许列表
+     - admin "*" 通配符 → 全部放行
+     - 支持 "server:*" 模式匹配
 ```
 
 ---
@@ -695,6 +739,80 @@ POST /api/crons {name, cron_expression, prompt}
 
 ---
 
+### 3.12 MCP — 外部工具集成
+
+**职责：** 连接外部 MCP (Model Context Protocol) 服务，发现工具，按角色过滤并包装为 LangChain 工具供 Agent 使用。
+
+#### 关键文件
+
+| 文件 | 作用 |
+|------|------|
+| `harness/mcp/manager.py` | `MCPManager` — 编排所有服务端连接和工具注册 |
+| `harness/mcp/client.py` | `MCPClient` — 单个 stdio/SSE 服务端连接 |
+| `harness/mcp/config.py` | `MCPServerStore` — JSON 持久化 (`data/mcp_servers.json`) |
+| `harness/mcp/types.py` | `MCPServerConfig`、`MCPToolInfo` |
+
+#### 连接流程
+
+```
+Gateway lifespan.startup()
+  → MCPManager.initialize()
+    → 遍历 data/mcp_servers.json 中 enabled 服务端
+      → MCPClient(server_config)
+        → transport=="stdio": stdio_client(command, args, env)
+        → transport=="sse":   sse_client(url)
+        → ClientSession(read, write)
+          → await session.initialize()
+            → await session.list_tools() → 发现工具
+              → 包装为 LangChain @tool 函数
+                func_name = f"mcp__{server_name}__{tool_name}"
+              → 注册到 MCPManager._tools[func_name]
+```
+
+#### MCP 工具包装
+
+```python
+@langchain_tool("mcp__filesystem__read", description="[MCP:filesystem] Read file contents")
+def _wrapper(**kwargs) -> str:
+    # 异步调用：在同步上下文中使用 asyncio
+    return client.call_tool("read", kwargs)
+```
+
+工具名使用 `mcp__{server}__{tool}` 双下划线分隔格式。`ToolFilterMiddleware` 解析此前缀，与 `rbac.yaml` 中 `mcp_tools` 配置（`server:tool` 格式）匹配进行过滤。
+
+#### 角色过滤
+
+```
+RBAC 配置 (rbac.yaml):
+  admin:    mcp_tools: ["*"]                          → 全部 MCP 工具
+  manager:  mcp_tools: ["filesystem:read", "db:query"] → 指定工具
+  operator: mcp_tools: []                              → 无 MCP 工具
+  viewer:   mcp_tools: []                              → 无 MCP 工具
+```
+
+支持通配符：`"*"` (全部)、`"server:*"` (某服务器的全部工具)。
+
+`ToolFilterMiddleware` 在每次模型调用时执行 MCP 工具过滤：解析 `mcp__filesystem__read` → `filesystem:read` → 在角色允许列表中匹配。
+
+#### MCP 服务端存储格式
+
+```json
+{
+  "filesystem": {
+    "name": "filesystem",
+    "transport": "stdio",
+    "command": "npx",
+    "args": ["-y", "@modelcontextprotocol/server-filesystem", "/workspace"],
+    "enabled": true,
+    "env": {}
+  }
+}
+```
+
+环境变量使用 `${VAR}` 占位符，连接时从进程环境解析，不持久化密钥原文。
+
+---
+
 ## L4 Agent Runtime — 智能体运行时
 
 **职责：** 根据用户角色和配置创建 LangChain Agent 实例，装配工具集和中间件链。
@@ -726,12 +844,18 @@ MEMBER_TOOLS = [file_read, file_write, command_exec, web_search, query_database,
 ### 角色→工具集映射
 
 ```python
+# 工具集选择
 if user_ctx.role in CAPTAIN_CAPABLE_ROLES and config.team_enabled:
-    tools = CAPTAIN_TOOLS      # admin/manager, 团队模式开启 → 11 个
+    tools = list(CAPTAIN_TOOLS)       # admin/manager + team → 11 个
 elif user_ctx.role in SUBAGENT_CAPABLE_ROLES:
-    tools = ALL_TOOLS          # admin/manager → 8 个（含 spawn_subagent）
+    tools = list(ALL_TOOLS)           # admin/manager → 8 个
 else:
-    tools = BASE_TOOLS         # operator/viewer → 7 个
+    tools = list(BASE_TOOLS)          # operator/viewer → 7 个
+
+# 附加角色允许的 MCP 工具
+if mcp_manager:
+    role_mcp_access = get_role_mcp_tool_access()
+    tools.extend(mcp_manager.get_tools_for_role(user_ctx.role, role_mcp_access))
 ```
 
 ---

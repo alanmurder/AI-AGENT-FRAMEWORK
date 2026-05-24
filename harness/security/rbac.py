@@ -48,6 +48,35 @@ def get_role_tool_access() -> dict[UserRole, list[str]]:
     return _ROLE_TOOL_ACCESS_CACHE
 
 
+def build_role_mcp_tool_access(rbac_config: dict) -> dict[UserRole, list[str]]:
+    """Build the role -> MCP tool name mapping from RBAC YAML config."""
+    role_map = {}
+    roles_section = rbac_config.get("rbac", {}).get("roles", {})
+
+    for role_name, role_data in roles_section.items():
+        role_enum = UserRole(role_name)
+        role_map[role_enum] = role_data.get("mcp_tools", [])
+
+    for role in UserRole:
+        if role not in role_map:
+            role_map[role] = []
+
+    return role_map
+
+
+# Lazy-loaded singleton cache for MCP tool access
+_ROLE_MCP_TOOL_ACCESS_CACHE: dict | None = None
+
+
+def get_role_mcp_tool_access() -> dict[UserRole, list[str]]:
+    """Get the role -> MCP tool access mapping (lazy-loaded from YAML)."""
+    global _ROLE_MCP_TOOL_ACCESS_CACHE
+    if _ROLE_MCP_TOOL_ACCESS_CACHE is None:
+        config = load_rbac_config()
+        _ROLE_MCP_TOOL_ACCESS_CACHE = build_role_mcp_tool_access(config)
+    return _ROLE_MCP_TOOL_ACCESS_CACHE
+
+
 def get_role_skill_access(role: UserRole) -> str:
     """Get the skill_access level for a role from RBAC config (default: 'all')."""
     config = load_rbac_config()

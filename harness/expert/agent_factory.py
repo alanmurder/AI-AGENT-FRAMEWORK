@@ -1,9 +1,10 @@
 """Expert agent factory — creates Agent instances from AgentProfile."""
 
 import structlog
+from pathlib import Path
 
 from runtime.config import AgentConfig
-from runtime.context_schema import UserContext
+from runtime.context_schema import UserContext, UserRole
 from runtime.models import create_primary_model, create_mini_model
 from runtime.tools import BASE_TOOLS
 from harness.expert.types import AgentProfile
@@ -21,6 +22,7 @@ from harness.middleware.security_check import SecurityCheckMiddleware
 from harness.middleware.output_validation import OutputValidationMiddleware
 from harness.middleware.memory_archive import MemoryArchiveMiddleware
 from harness.middleware.sandbox import SandboxMiddleware
+from harness.security.rbac import get_role_mcp_tool_access
 
 logger = structlog.get_logger()
 
@@ -34,13 +36,28 @@ def create_expert_agent(
     skill_manager: SkillManager,
     approval_checker: ApprovalChecker,
     sandbox_runner: SandboxRunner | None = None,
+    mcp_manager=None,
 ):
-    """Create a full Agent instance for an expert, with its own SOUL.md and Skill Plugin."""
+    """Create a full Agent instance for an expert, with SOUL.md, Skills, and MCP tools."""
     from langchain.agents import create_agent
 
     model = create_primary_model(config) if profile.model_preference == "primary" else create_mini_model(config)
     mini_model = create_mini_model(config)
-    tools = BASE_TOOLS
+
+    # Start with base tools
+    tools = list(BASE_TOOLS)
+
+    # Add MCP tools from the agent's profile (role-filtered)
+    if mcp_manager and profile.mcp_tools:
+        role = UserRole(profile.role)
+        role_mcp_access = get_role_mcp_tool_access()
+        mcp_tools = mcp_manager.get_tools_for_role(role, role_mcp_access)
+        # Further filter to only tools in the agent's explicit mcp_tools list
+        for tool_fn in mcp_tools:
+            from harness.mcp.manager import func_name_to_full_name
+            full_name = func_name_to_full_name(tool_fn.name)
+            if full_name in profile.mcp_tools:
+                tools.append(tool_fn)
 
     context_config = build_context_config(config)
     compressor = ContextCompressor(context_config, mini_model)
@@ -68,3 +85,51 @@ def create_expert_agent(
         context_schema=UserContext,
     )
     return agent
+
+
+def create_expert_agent_for_user(
+    profile: AgentProfile,
+    user_ctx: UserContext,
+    config: AgentConfig,
+    memory_manager: MemoryManager,
+    skill_manager: SkillManager,
+    approval_checker: ApprovalChecker,
+    sandbox_runner: SandboxRunner | None = None,
+    mcp_manager=None,
+):
+    """Create an expert agent that operates under the agent's configured role.
+
+    The expert agent inherits its own role for tool filtering, not the calling user's role.
+    The calling user just needs authentication to access the agent.
+    """
+    import structlog
+    _log = structlog.get_logger()
+
+    # Use the agent profile's role for tool filtering
+    from runtime.context_schema import UserRole
+    agent_role = UserRole(profile.role) if profile.role else user_ctx.role
+
+    expert_ctx = UserContext(
+        user_id=user_ctx.user_id,
+        tenant_id=user_ctx.tenant_id,
+        role=agent_role,
+        permissions=user_ctx.permissions,
+        memory_path=user_ctx.memory_path,
+        session_id=user_ctx.session_id,
+        agent_id=profile.name,
+    )
+
+    registry_soul = AgentRegistry()
+    soul = registry_soul.load_soul_content(profile.name, Path(config.project_root) if config.project_root else Path.cwd())
+
+    return create_expert_agent(
+        profile=profile,
+        soul_content=soul,
+        user_ctx=expert_ctx,
+        config=config,
+        memory_manager=memory_manager,
+        skill_manager=skill_manager,
+        approval_checker=approval_checker,
+        sandbox_runner=sandbox_runner,
+        mcp_manager=mcp_manager,
+    )
