@@ -35,7 +35,12 @@ PROVIDER_MODEL_MAP = {
 
 
 def _inject_api_key(config: AgentConfig, provider: str) -> None:
-    """Ensure the provider's API key is available in the environment variable expected by LangChain."""
+    """Ensure the provider's API key is available in the environment variable expected by LangChain.
+
+    If no API key is configured, a placeholder is injected to allow model construction.
+    Actual API calls will fail with an auth error — this is intentional and allows the server
+    to start for health checks, static file serving, and API docs even without a valid key.
+    """
     info = PROVIDER_MODEL_MAP.get(provider, {})
     env_key = info.get("env_key")
     config_key = info.get("config_key")
@@ -43,6 +48,9 @@ def _inject_api_key(config: AgentConfig, provider: str) -> None:
         key_value = getattr(config, config_key, "")
         if key_value and not os.environ.get(env_key):
             os.environ[env_key] = key_value
+        elif not key_value and not os.environ.get(env_key):
+            # Placeholder allows model construction; API calls will fail with auth error
+            os.environ[env_key] = "sk-placeholder-missing-api-key"
 
 
 def create_primary_model(config: AgentConfig) -> BaseChatModel:

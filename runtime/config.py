@@ -90,6 +90,11 @@ class AgentConfig(BaseSettings):
     mid_term_retention_days: int = 30
     mid_term_search_top_k: int = 5
 
+    # Production
+    serve_static: bool = False
+    static_dir: str = "web/dist"
+    static_url_path: str = "/"
+
     # Sandbox (Phase 2)
     sandbox_enabled: bool = False
     sandbox_docker_image: str = "ai-agent-sandbox:latest"

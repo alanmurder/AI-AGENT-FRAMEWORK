@@ -12,6 +12,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Depends, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from runtime.config import AgentConfig
@@ -271,7 +272,13 @@ async def get_session(user_id: str, session_id: str):
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "version": "0.1.0", "schedulers": "running"}
+    redis_ok = False
+    try:
+        await memory_manager.short_term.redis.ping()
+        redis_ok = True
+    except Exception:
+        pass
+    return {"status": "ok", "version": "0.1.0", "redis": "connected" if redis_ok else "disconnected"}
 
 
 # --- Cron Task API ---
@@ -860,6 +867,38 @@ async def ws_chat(websocket: WebSocket):
             await websocket.send_text(json.dumps({"type": "error", "content": str(e)}))
         except Exception:
             pass
+
+
+# Mount frontend static files in production mode
+if config.serve_static:
+    from fastapi.responses import FileResponse
+    _static_root = Path(config.project_root) / config.static_dir
+    if _static_root.is_dir():
+        # Serve /assets and other subdirectories as static files
+        for _sub in _static_root.iterdir():
+            if _sub.is_dir():
+                app.mount(f"/{_sub.name}", StaticFiles(directory=str(_sub)), name=f"static-{_sub.name}")
+
+        # SPA fallback: serve index.html for all paths that don't match a static file or API route
+        @app.get("/{_full_path:path}")
+        async def _serve_spa(_full_path: str):
+            # Try to serve a matching static file first (e.g. /vite.svg)
+            _file = (_static_root / _full_path).resolve()
+            try:
+                _file.relative_to(_static_root.resolve())
+            except ValueError:
+                raise HTTPException(status_code=404)
+            if _file.is_file():
+                return FileResponse(str(_file))
+            # SPA fallback
+            _index = _static_root / "index.html"
+            if _index.is_file():
+                return FileResponse(str(_index))
+            raise HTTPException(status_code=404, detail="Frontend not found")
+
+        logger.info("frontend_static_mounted", directory=str(_static_root))
+    else:
+        logger.warning("static_dir_not_found", directory=str(_static_root))
 
 
 def main():

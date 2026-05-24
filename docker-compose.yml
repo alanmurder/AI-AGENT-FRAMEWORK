@@ -1,0 +1,63 @@
+version: "3.8"
+
+services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  app:
+    build: .
+    image: ai-agent-platform:latest
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      AI_AGENT_REDIS_URL: redis://redis:6379/0
+      AI_AGENT_SERVE_STATIC: "true"
+      AI_AGENT_STATIC_DIR: /app/web/dist
+      AI_AGENT_PROJECT_ROOT: /app
+      AI_AGENT_LOG_LEVEL: INFO
+      AI_AGENT_GATEWAY_WORKERS: 4
+      AI_AGENT_JWT_SECRET: ${AI_AGENT_JWT_SECRET:-change-this-in-production}
+      AI_AGENT_DEEPSEEK_API_KEY: ${AI_AGENT_DEEPSEEK_API_KEY:-}
+      AI_AGENT_OPENAI_API_KEY: ${AI_AGENT_OPENAI_API_KEY:-}
+      AI_AGENT_ANTHROPIC_API_KEY: ${AI_AGENT_ANTHROPIC_API_KEY:-}
+    volumes:
+      - app_data:/var/lib/ai-agent-platform
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    profiles:
+      - pg
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: ai_agent_platform
+      POSTGRES_USER: ai_agent
+      POSTGRES_PASSWORD: ${PG_PASSWORD:-ai_agent_secret}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+
+volumes:
+  redis_data:
+  app_data:
+  pg_data:

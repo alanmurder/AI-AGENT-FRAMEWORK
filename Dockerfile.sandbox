@@ -1,0 +1,8 @@
+FROM python:3.11-slim
+
+RUN useradd --create-home --shell /bin/bash sandbox
+
+RUN pip install --no-cache-dir numpy pandas
+
+USER sandbox
+WORKDIR /home/sandbox
