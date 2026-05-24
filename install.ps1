@@ -264,7 +264,7 @@ else {
 }
 
 Write-Info "(This may take several minutes — downloading packages...)"
-$InstallOutput = & $PythonExe -m pip install -e "$RootDir[$InstallSpec]" --default-timeout=120 @PipArgs 2>&1
+$InstallOutput = & $PythonExe -m pip install -e "$RootDir$InstallSpec" --default-timeout=120 @PipArgs 2>&1
 if ($LASTEXITCODE -ne 0) {
     Write-Warn "Pip install output (last 10 lines):"
     $InstallOutput | Select-Object -Last 10 | ForEach-Object { Write-Host "    $_" }
@@ -288,14 +288,15 @@ if (-not $NoFrontend) {
         Write-Info "Installing frontend npm dependencies..."
         Push-Location $WebDir
         try {
-            & npm ci 2>&1 | Out-Null
+            # Use cmd /c to avoid PowerShell treating npm stderr warnings as fatal errors
+            cmd /c "npm ci 2>nul"
             if ($LASTEXITCODE -ne 0) {
                 Write-Warn "npm ci failed, trying npm install..."
-                & npm install 2>&1 | Out-Null
+                cmd /c "npm install 2>nul"
                 if ($LASTEXITCODE -ne 0) { throw "npm install failed" }
             }
             Write-Info "Building frontend..."
-            & npm run build 2>&1 | Out-Null
+            cmd /c "npm run build 2>nul"
             if ($LASTEXITCODE -ne 0) { throw "npm run build failed" }
 
             $DistHtml = Join-Path $WebDir "dist\index.html"
