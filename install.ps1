@@ -38,15 +38,13 @@ $ErrorActionPreference = "Stop"
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-$Host.UI.RawUI.ForegroundColor = "White"
 function Write-Info   { Write-Host "  * $args" -ForegroundColor Green }
 function Write-Warn   { Write-Host "  ! $args" -ForegroundColor Yellow }
-function Write-Error  { Write-Host "  X $args" -ForegroundColor Red }
-function Fatal        { Write-Error $args; exit 1 }
+function Write-Error   { Write-Host "  X $args" -ForegroundColor Red }
+function Fatal($msg)  { Write-Host "  X $msg" -ForegroundColor Red; exit 1 }
 
 $RootDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $PythonExe = Join-Path $RootDir ".venv\Scripts\python.exe"
-$PipExe = Join-Path $RootDir ".venv\Scripts\pip.exe"
 
 # ---------------------------------------------------------------------------
 # Banner
@@ -64,7 +62,6 @@ $IsAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIde
 if (-not $IsAdmin) {
     Write-Warn "Not running as Administrator."
     Write-Warn "Redis installation and some operations may require admin rights."
-    Write-Warn "Consider re-running this script as Administrator."
     Write-Host ""
 }
 else {
@@ -98,10 +95,10 @@ else {
 }
 
 # ---------------------------------------------------------------------------
-# Phase 2: Install Python 3.11
+# Phase 2: Install Python 3.11+
 # ---------------------------------------------------------------------------
 Write-Host ""
-Write-Host "  Phase 2/6: Installing Python 3.11..." -ForegroundColor Cyan
+Write-Host "  Phase 2/6: Installing Python 3.11+..." -ForegroundColor Cyan
 Write-Host "  --------------------------------------" -ForegroundColor Cyan
 
 $PythonFound = $false
@@ -118,7 +115,9 @@ if (-not $PythonFound) {
     if ($WingetAvailable) {
         Write-Info "Installing Python 3.13 via winget..."
         winget install Python.Python.3.13 --accept-source-agreements --accept-package-agreements
-        Write-Info "Python 3.13 installed via winget."
+        Write-Info "Python 3.13 installed via winget. You may need to restart your terminal."
+        # Refresh PATH after winget install
+        $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "User")
     }
     else {
         Write-Warn "winget not available. Please install Python 3.11+ manually from:"
@@ -149,7 +148,8 @@ if (-not $NodeFound) {
     if ($WingetAvailable) {
         Write-Info "Installing Node.js LTS via winget..."
         winget install OpenJS.NodeJS.LTS --accept-source-agreements --accept-package-agreements
-        Write-Info "Node.js LTS installed via winget."
+        Write-Info "Node.js LTS installed via winget. You may need to restart your terminal."
+        $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "User")
     }
     else {
         Write-Warn "winget not available. Please install Node.js LTS manually from:"
@@ -177,7 +177,6 @@ if (-not $SkipRedis) {
     catch { }
 
     if (-not $RedisFound) {
-        # Check if redis-server exists on PATH
         try {
             $null = Get-Command redis-server -ErrorAction Stop
             $RedisFound = $true
@@ -216,8 +215,6 @@ else {
 # ---------------------------------------------------------------------------
 Write-Host ""
 Write-Info "Refreshing PATH environment variable..."
-$env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "User") + ";" + $env:Path
-# Also reload from registry via a simple trick
 $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "User")
 
 # ---------------------------------------------------------------------------
@@ -228,7 +225,7 @@ Write-Host "  Phase 5/6: Python virtual environment..." -ForegroundColor Cyan
 Write-Host "  -----------------------------------------" -ForegroundColor Cyan
 
 if (Test-Path (Join-Path $RootDir ".venv")) {
-    Write-Warn ".venv already exists. Skipping creation."
+    Write-Warn ".venv already exists. Using existing environment."
 }
 else {
     Write-Info "Creating Python virtual environment..."
@@ -237,9 +234,25 @@ else {
     Write-Info "Virtual environment created at .venv"
 }
 
-Write-Info "Upgrading pip..."
-& $PipExe install --upgrade pip -q
-if (-not $?) { Fatal "Failed to upgrade pip." }
+# Detect system proxy for pip
+$PipArgs = @()
+try {
+    $ProxyUrl = [System.Net.WebRequest]::GetSystemWebProxy().GetProxy("https://pypi.org")
+    if ($ProxyUrl -and $ProxyUrl.AbsoluteUri -ne "https://pypi.org/") {
+        Write-Info "System proxy detected: $($ProxyUrl.AbsoluteUri)"
+        $PipArgs += "--proxy"
+        $PipArgs += $ProxyUrl.AbsoluteUri
+    }
+}
+catch {
+    Write-Info "No system proxy detected."
+}
+
+Write-Info "Upgrading pip (non-fatal)..."
+& $PythonExe -m pip install --upgrade pip --default-timeout=120 @PipArgs 2>&1 | Out-Null
+if (-not $?) {
+    Write-Warn "Pip upgrade had issues — continuing anyway."
+}
 
 if ($NoSandbox) {
     $InstallSpec = ".[dev,prod]"
@@ -250,8 +263,13 @@ else {
     Write-Info "Installing base + dev + prod + sandbox dependencies..."
 }
 
-& $PipExe install -e "$RootDir[$InstallSpec]" -q
-if (-not $?) { Fatal "Failed to install Python dependencies." }
+Write-Info "(This may take several minutes — downloading packages...)"
+$InstallOutput = & $PythonExe -m pip install -e "$RootDir[$InstallSpec]" --default-timeout=120 @PipArgs 2>&1
+if ($LASTEXITCODE -ne 0) {
+    Write-Warn "Pip install output (last 10 lines):"
+    $InstallOutput | Select-Object -Last 10 | ForEach-Object { Write-Host "    $_" }
+    Fatal "Failed to install Python dependencies. Check network/proxy settings and retry."
+}
 Write-Info "Python dependencies installed."
 
 # ---------------------------------------------------------------------------
@@ -270,11 +288,15 @@ if (-not $NoFrontend) {
         Write-Info "Installing frontend npm dependencies..."
         Push-Location $WebDir
         try {
-            & npm ci
-            if (-not $?) { throw "npm ci failed" }
+            & npm ci 2>&1 | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+                Write-Warn "npm ci failed, trying npm install..."
+                & npm install 2>&1 | Out-Null
+                if ($LASTEXITCODE -ne 0) { throw "npm install failed" }
+            }
             Write-Info "Building frontend..."
-            & npm run build
-            if (-not $?) { throw "npm run build failed" }
+            & npm run build 2>&1 | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "npm run build failed" }
 
             $DistHtml = Join-Path $WebDir "dist\index.html"
             if (Test-Path $DistHtml) {
@@ -329,7 +351,7 @@ Write-Host "  Installation complete!"                     -ForegroundColor Green
 Write-Host "============================================" -ForegroundColor Green
 Write-Host ""
 Write-Host "  Next steps:"
-Write-Host "    1. Edit .env with your API keys:"
+Write-Host "    1. Edit .env with your API keys (optional — server starts without them):"
 Write-Host "       notepad .env"
 Write-Host ""
 Write-Host "    2. (Optional) Start Redis if you need chat/memory features:"

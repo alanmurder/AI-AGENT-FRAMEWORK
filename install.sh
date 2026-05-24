@@ -201,9 +201,11 @@ echo ""
 echo "  Phase 3/5: Installing Python dependencies..."
 echo "  --------------------------------------------"
 
-PIP="$ROOT_DIR/.venv/bin/pip"
+PYTHON="$ROOT_DIR/.venv/bin/python"
 
-"$PIP" install --upgrade pip -q
+# Upgrade pip (non-fatal if it fails — e.g. due to proxy)
+log_info "Upgrading pip..."
+"$PYTHON" -m pip install --upgrade pip --default-timeout=120 2>&1 | tail -1 || log_warn "Pip upgrade had issues — continuing anyway."
 
 if [ "$NO_SANDBOX" = true ]; then
     INSTALL_SPEC=".[dev,prod]"
@@ -213,7 +215,11 @@ else
     log_info "Installing base + dev + prod + sandbox dependencies..."
 fi
 
-"$PIP" install -e "$ROOT_DIR[$INSTALL_SPEC]" -q
+log_info "(This may take several minutes — downloading packages...)"
+"$PYTHON" -m pip install -e "$ROOT_DIR[$INSTALL_SPEC]" --default-timeout=120 || {
+    log_error "Failed to install Python dependencies. Check network/proxy and retry."
+    exit 1
+}
 log_info "Python dependencies installed."
 
 # ---------------------------------------------------------------------------
