@@ -2,7 +2,7 @@
 
 基于 Harness 分层架构的企业级 AI Native 通用智能体平台，面向制造业/工控领域。私有部署，单租户模式。
 
-> 📖 **深入理解代码实现？** 阅读 [架构深度解析](architecture-deep-dive.md) — 按 L1→L6 层次组织，包含每个模块的文件清单、核心流程和代码级实现细节。
+> 📖 **深入理解代码实现？** 阅读 [架构深度解析](docs\architecture-deep-dive.md) — 按 L1→L6 层次组织，包含每个模块的文件清单、核心流程和代码级实现细节。
 
 ## 目录
 
@@ -19,9 +19,10 @@
   - [7. 多智能体协作 (Multi-Agent)](#7-多智能体协作-multi-agent)
   - [8. 进化系统 (Evolution)](#8-进化系统-evolution)
   - [9. 专家智能体 (Expert Agent)](#9-专家智能体-expert-agent)
-  - [10. Agent Teams](#10-agent-teams)
-  - [11. 定时调度 (Scheduler)](#11-定时调度-scheduler)
-  - [12. Gateway (L2)](#12-gateway-l2)
+  - [10. 外部智能体接入 (External Agent)](#10-外部智能体接入-external-agent)
+  - [11. Agent Teams](#11-agent-teams)
+  - [12. 定时调度 (Scheduler)](#12-定时调度-scheduler)
+  - [13. Gateway (L2)](#13-gateway-l2)
 - [安全机制设计详解](#安全机制设计详解)
   - [安全设计哲学](#安全设计哲学)
   - [认证安全](#认证安全)
@@ -493,7 +494,78 @@ GET    /api/roles/{role}/mcp-tools      — 列出该角色可用的 MCP 工具
 - `validate_mcp_tools_from_profile(role, mcp_tools)` — 过滤越权 MCP 工具
 - 支持 `"*"` 和 `"server:*"` 通配符匹配
 
-### 10. Agent Teams
+### 10. 外部智能体接入 (External Agent)
+
+外部智能体是已有的垂域智能体或工作流服务，平台不负责创建运行时，只做**HTTP 代理转发**。与配置型专家不同，外部智能体自带提示词、工具和运行时，平台只需注册端点信息。
+
+#### 两类专家智能体对比
+
+| | 配置型 (internal) | 外部型 (external) |
+|---|---|---|
+| **运行时** | 平台内部 LangChain Agent | 外部独立服务 |
+| **创建方式** | 选角色→选Skill→选MCP→写Soul→组装Agent | 只需注册端点 URL 和协议 |
+| **Skill/MCP** | 平台管理、注入 | 外部服务自带 |
+| **提示词** | SOUL.md 存储在平台 | 外部服务自带 |
+| **调用方式** | LangChain Agent 本地执行 | HTTP 代理转发 + SSE 流式回传 |
+| **权限模型** | 复用 UserRole.level 可见性 | 完全复用配置型权限模型 |
+| **管理接口** | CRUD + Soul编辑 | CRUD + 连接测试 |
+
+#### 核心组件
+
+| 类 | 文件 | 功能 |
+|----|------|------|
+| `AgentProxyHandler` | `harness/external_agent/proxy.py` | HTTP 转发 + SSE 流式读取 |
+| `ExternalEndpoint` | `harness/external_agent/types.py` | 端点配置（URL/协议/认证/超时） |
+| `OpenAICompatibleAdapter` | `harness/external_agent/types.py` | OpenAI Chat API 协议适配 |
+| `SimpleJsonAdapter` | `harness/external_agent/types.py` | 通用 JSON REST 协议适配 |
+
+#### 端点配置
+
+```json
+{
+  "type": "external",
+  "endpoint": {
+    "url": "http://workflow-engine:8080/api/v1/chat",
+    "protocol": "openai-chat",
+    "method": "POST",
+    "auth_type": "bearer",
+    "auth_credential": "${WF_TOKEN}",
+    "timeout_seconds": 120
+  }
+}
+```
+
+认证凭据使用 `${ENV_VAR}` 占位符，运行时从环境变量解析，JSON 文件中不存储明文密钥。
+
+#### Gateway 路由
+
+```
+用户请求 → 认证 + 角色可见性检查
+  ├─ profile.type == "external"
+  │   └─ AgentProxyHandler → HTTP 转发 → SSE 流式回传
+  └─ profile.type == "internal"
+      └─ create_expert_agent() → LangChain Agent 本地执行
+```
+
+**支持的协议**：
+| 协议 | 适用场景 |
+|------|---------|
+| `openai-chat` | 兼容 OpenAI Chat API 的服务（如 vLLM、Ollama、OpenAI 兼容网关） |
+| `simple-json` | 通用 REST 工作流（`{"input":"...", "output":"..."}` 格式） |
+
+#### 连接测试
+
+```
+POST /api/agents/manage/{name}/test-connection
+```
+
+发送探测请求到外部端点，验证可达性和响应格式。返回 `{reachable: true/false, status_code, response_preview}`。
+
+#### 管理 API（仅 admin）
+
+外部智能体复用专家智能体的 CRUD API（`/api/agents/manage`），创建时将 `type` 设为 `"external"`，提供 `endpoint` 配置。`GET /api/agents` 智能体广场同样按角色过滤可见的外部智能体。
+
+### 11. Agent Teams
 
 队长-队员协作模式，使用同构成员 + 动态 prompt + 共享 TaskBoard + 主动认领。
 
@@ -538,14 +610,14 @@ members:
 description: 处理生产相关的综合问题
 ```
 
-### 11. 定时调度 (Scheduler)
+### 12. 定时调度 (Scheduler)
 
 | 类型 | 实现 | 功能 |
 |------|------|------|
 | Heartbeat | APScheduler | 定期唤醒 Agent 执行主动监控 (默认 30min) |
 | Cron | 5-field cron | 用户自定义定时任务，支持增删查 |
 
-### 12. Gateway (L2)
+### 13. Gateway (L2)
 
 #### REST API 端点
 
@@ -564,6 +636,7 @@ description: 处理生产相关的综合问题
 | `/api/agents/{name}/chat` | POST | JWT/API Key | 专家智能体对话 |
 | `/api/agents/manage` | GET/POST | admin | 专家智能体 CRUD |
 | `/api/agents/manage/{name}` | GET/PUT/DELETE | admin | 单个智能体管理 |
+| `/api/agents/manage/{name}/test-connection` | POST | admin | 外部智能体连接测试 |
 | `/api/teams` | GET | 无 | 团队列表 |
 | `/api/mcp/servers` | GET/POST | admin | MCP 服务端管理 |
 | `/api/mcp/servers/{name}` | PUT/DELETE | admin | 单个 MCP 服务端 |
@@ -704,17 +777,16 @@ authenticate_user(token) → UserContext
 
 #### 通用 vs 专家智能体对比
 
-| 维度 | 通用智能体 | 专家智能体 |
-|------|-----------|-----------|
-| agent_id | `""` | `"equipment_monitor"` 等 |
-| 创建函数 | `create_agent_for_user()` | `create_expert_agent_for_user()` |
-| System Prompt | 通用企业助手 | SOUL.md 人格 + 选定 Skill 指令 |
-| 工具集 | 按角色 BASE/ALL/CAPTAIN + 角色 MCP 工具 | BASE_TOOLS + profile.mcp_tools |
-| 工具权限角色 | 登录用户角色 | 专家配置的角色 |
-| Skill 注入 | 全部角色可用 Skill | 仅 profile.skills 中配置的 Skill |
-| 会话记录 | `agent_id=""` | `agent_id="equipment_monitor"` |
-| UI 展示 | "默认智能体" | "设备巡检专家 🔧" |
-| 管理方式 | 无 | 文件系统（YAML）或 API 动态管理 |
+| 维度 | 通用智能体 | 专家智能体(配置型) | 专家智能体(外部型) |
+|------|-----------|-------------------|-------------------|
+| agent_id | `""` | `"equipment_monitor"` 等 | `"predictive_maintenance"` 等 |
+| 创建函数 | `create_agent_for_user()` | `create_expert_agent_for_user()` | `AgentProxyHandler` |
+| System Prompt | 通用企业助手 | SOUL.md 人格 + 选定 Skill 指令 | 外部服务自带 |
+| 工具集 | 按角色 + MCP 工具 | BASE_TOOLS + profile.mcp_tools | 外部服务自带 |
+| 工具权限角色 | 登录用户角色 | 专家配置的角色 | 专家配置的角色 |
+| Skill 注入 | 角色可用 Skill | profile.skills 中配置的 | 外部服务自带 |
+| 调用方式 | LangChain 本地执行 | LangChain 本地执行 | HTTP 代理转发 + SSE |
+| 管理方式 | 无 | YAML 或 API 动态管理 | API 注册 + 连接测试 |
 
 #### 中间件链（两种 Agent 共享）
 
@@ -1150,6 +1222,10 @@ ai-agent-framework/
 │   │   ├── gepa.py           # GEPAOptimizer
 │   │   ├── auto_evolve.py    # AutoEvolver
 │   │   └ and types.py          # 进化类型定义
+│   ├── external_agent/        # 外部智能体接入
+│   │   ├── proxy.py           # AgentProxyHandler — HTTP 转发
+│   │   ├── adapter.py         # 协议适配器 (OpenAI/SimpleJSON)
+│   │   └ types.py             # ExternalEndpoint 配置
 │   ├── mcp/                   # MCP 集成
 │   │   ├── manager.py        # MCPManager — 连接编排
 │   │   ├── client.py         # MCPClient — 单服务端连接

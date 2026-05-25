@@ -6,3 +6,5 @@ skill_plugin: industrial
 model_preference: primary
 max_context_tokens: 32000
 role: operator
+skills: []
+mcp_tools: []

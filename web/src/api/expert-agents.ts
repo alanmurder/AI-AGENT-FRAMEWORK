@@ -1,6 +1,6 @@
 import client from './client';
 import type { AgentProfile } from '../types/agent';
-import type { CreateAgentRequest, UpdateAgentRequest, RoleSkillInfo, RoleMCPToolInfo } from '../types/api';
+import type { CreateAgentRequest, UpdateAgentRequest, RoleSkillInfo, RoleMCPToolInfo, TestConnectionResult } from '../types/api';
 
 export async function listManageableAgents(): Promise<{ agents: AgentProfile[] }> {
   const res = await client.get('/api/agents/manage');
@@ -34,5 +34,10 @@ export async function getRoleSkills(role: string): Promise<{ role: string; skill
 
 export async function getRoleMCPTools(role: string): Promise<{ role: string; mcp_tools: RoleMCPToolInfo[] }> {
   const res = await client.get(`/api/roles/${role}/mcp-tools`);
+  return res.data;
+}
+
+export async function testAgentConnection(name: string): Promise<TestConnectionResult> {
+  const res = await client.post(`/api/agents/manage/${name}/test-connection`);
   return res.data;
 }

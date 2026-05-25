@@ -21,6 +21,7 @@
   - [3.10 Sandbox — 沙箱执行](#310-sandbox--沙箱执行)
   - [3.11 Scheduler — 定时调度](#311-scheduler--定时调度)
   - [3.12 MCP — 外部工具集成](#312-mcp--外部工具集成)
+  - [3.13 External Agent — 外部智能体接入](#313-external-agent--外部智能体接入)
 - [L4 Agent Runtime — 智能体运行时](#l4-agent-runtime--智能体运行时)
 - [L5 LLM Provider — 模型接入层](#l5-llm-provider--模型接入层)
 - [L6 Infrastructure — 基础设施层](#l6-infrastructure--基础设施层)
@@ -97,6 +98,7 @@ class StandardMessage:
 | `/api/agents/{name}/chat` | POST | JWT | 专家对话 |
 | `/api/agents/manage` | GET/POST | admin | 专家智能体 CRUD |
 | `/api/agents/manage/{name}` | GET/PUT/DELETE | admin | 单个智能体管理 |
+| `/api/agents/manage/{name}/test-connection` | POST | admin | 外部智能体连接测试 |
 | `/api/skills` | GET | JWT | 技能清单 |
 | `/api/skills/verify` | POST | admin/manager | 三 Agent 验证 |
 | `/api/skills/optimize/{name}` | POST | admin/manager | GEPA 优化 |
@@ -550,7 +552,7 @@ Evaluator Agent (评估)
 
 ### 3.8 Expert — 专家智能体
 
-**职责：** 创建具有专属人格（SOUL.md）、Skill 列表、MCP 工具列表和角色权限的专业智能体。支持文件系统预置（YAML）和 API 动态管理（JSON）两种方式。
+**职责：** 创建具有专属人格（SOUL.md）、Skill 列表、MCP 工具列表和角色权限的专业智能体。支持三种来源：文件系统预置（YAML）、API 动态配置（JSON）、外部接入（HTTP 代理）。外部智能体的详细设计见 [3.13 External Agent](#313-external-agent--外部智能体接入)。
 
 #### 关键文件
 
@@ -810,6 +812,82 @@ RBAC 配置 (rbac.yaml):
 ```
 
 环境变量使用 `${VAR}` 占位符，连接时从进程环境解析，不持久化密钥原文。
+
+---
+
+### 3.13 External Agent — 外部智能体接入
+
+**职责：** 将已有的垂域智能体/工作流服务接入平台，通过 HTTP 代理转发实现对话，无需平台组装运行时。
+
+#### 关键文件
+
+| 文件 | 作用 |
+|------|------|
+| `harness/external_agent/proxy.py` | `AgentProxyHandler` — HTTP 转发 + SSE 流式读取 |
+| `harness/external_agent/types.py` | `ExternalEndpoint`、协议适配器 (`OpenAICompatibleAdapter`、`SimpleJsonAdapter`) |
+
+#### 与配置型专家的本质区别
+
+```
+配置型 (internal):  平台组装 SOUL + Skill + MCP → LangChain Agent → 本地执行
+外部型 (external):  平台注册端点 → Gateway 路由 → HTTP 代理转发 → 外部服务执行
+```
+
+外部智能体**不需要** `soul_file`、`skills`、`mcp_tools` 字段 — 这些都由外部服务自己管理。平台只负责认证、可见性控制和请求转发。
+
+#### AgentProxyHandler 流程
+
+```python
+class AgentProxyHandler:
+    def __init__(self, endpoint: ExternalEndpoint, protocol: str):
+        self._adapter = get_adapter(protocol)  # OpenAICompatibleAdapter / SimpleJsonAdapter
+
+    async def invoke(self, message, user_id, session_id, history):
+        headers = self._adapter.build_headers(self.endpoint)  # 含认证
+        body = self._adapter.build_request(message, user_id, session_id, ...)
+        resp = await httpx.post(self.endpoint.url, headers=headers, json=body)
+        return ProxyResult(content=self._adapter.extract_response(resp.json()))
+
+    async def stream(self, message, user_id, session_id, history):
+        # 使用 httpx.stream() 读取 SSE，逐行解析
+        async for line in response.aiter_lines():
+            if line.startswith("data: "):
+                chunk = self._adapter.extract_stream_chunk(json.loads(data_str))
+                if chunk:
+                    yield chunk
+```
+
+#### Gateway 路由分支
+
+```
+WebSocket / REST 收到 chat 请求 (agent_id)
+  ├─ profile.is_external → AgentProxyHandler.stream/invoke()
+  │   └─ logger: agent_type=external
+  └─ profile.is_internal → create_expert_agent_for_user()
+      └─ logger: agent_type=expert
+```
+
+#### 协议适配器
+
+**OpenAICompatibleAdapter**：适配兼容 OpenAI Chat API 的服务。
+- 请求体：`{"messages": [...], "stream": true, "user": "..."}`
+- 响应提取：`choices[0].message.content`
+- 流式提取：`choices[0].delta.content`
+
+**SimpleJsonAdapter**：适配通用 JSON REST 端点。
+- 请求体：`{"input": "用户消息", "user": "...", "history": [...]}`
+- 响应提取：从 `output`/`result`/`response`/`content` 字段中获取
+
+#### 安全设计
+
+| 层级 | 措施 |
+|------|------|
+| 认证凭据保护 | `${ENV_VAR}` 占位符，运行时解析，JSON 存储不包含明文 |
+| 角色可见性 | 复用 `UserRole.level` — 用户只能看到/对话 ≤ 自己角色的外部智能体 |
+| 管理权限 | 创建/修改/删除/测试连接均需 `require_admin` |
+| 超时保护 | `timeout_seconds` 可配置，默认 120s |
+| 错误隔离 | 外部端点不可达返回友好错误，不崩溃 Agent 进程 |
+| 连接测试 | `POST /api/agents/manage/{name}/test-connection` — 保存前验证可达性 |
 
 ---
 

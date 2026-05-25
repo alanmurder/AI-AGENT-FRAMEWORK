@@ -39,6 +39,9 @@ from harness.multi_agent.subagent import SubAgentRunner
 from harness.skill.plugin import PluginManager
 from harness.expert.registry import AgentRegistry
 from harness.expert.agent_factory import create_expert_agent
+from harness.expert.types import EndpointConfig
+from harness.external_agent.types import ExternalEndpoint, get_adapter
+from harness.external_agent.proxy import AgentProxyHandler
 
 # Configure structlog — uses stdlib logging so output goes to both console and file
 structlog.configure(
@@ -112,6 +115,33 @@ def require_admin(authorization: str = Header(default=None)) -> UserContext:
     if user_ctx.role != UserRole.ADMIN:
         raise HTTPException(status_code=403, detail="Only admin can perform this action")
     return user_ctx
+
+
+def authenticate_optional(authorization: str = Header(default=None)) -> UserContext | None:
+    """Authenticate user if token present. Returns None if no credentials.
+    Does NOT raise 401 — caller decides access level for unauthenticated users."""
+    auth_header = (authorization or "").strip()
+    if not auth_header:
+        return None
+    token = auth_header.replace("Bearer ", "") if auth_header.startswith("Bearer ") else ""
+    api_key = auth_header if not auth_header.startswith("Bearer ") else ""
+    try:
+        return authenticate_user(api_key=api_key, token=token)
+    except HTTPException:
+        return None
+
+
+def require_role_or_above(min_role: UserRole) -> callable:
+    """Decorator/factory: returns a dependency that requires the caller to have min_role or higher."""
+    def _check(authorization: str = Header(default=None)) -> UserContext:
+        auth_header = authorization or ""
+        token = auth_header.replace("Bearer ", "") if auth_header.startswith("Bearer ") else ""
+        api_key = auth_header if not auth_header.startswith("Bearer ") else ""
+        user_ctx = authenticate_user(api_key=api_key, token=token)
+        if user_ctx.role.level < min_role.level:
+            raise HTTPException(status_code=403, detail=f"Requires {min_role.value} role or higher")
+        return user_ctx
+    return _check
 
 
 @asynccontextmanager
@@ -468,20 +498,34 @@ class ExpertChatResponse(BaseModel):
 
 
 @app.get("/api/agents")
-async def list_experts():
-    """Agent marketplace — list all available expert agents."""
+async def list_experts(authorization: str = Header(default=None)):
+    """Agent marketplace — list expert agents visible to the user's role.
+
+    Unauthenticated → viewer-level agents only.
+    Authenticated → agents with role level ≤ user's role level."""
+    user_ctx = authenticate_optional(authorization)
+    max_level = user_ctx.role.level if user_ctx else UserRole.VIEWER.level
+
+    all_profiles = expert_registry.list_profiles()
+    visible = [p for p in all_profiles if UserRole(p.role).level <= max_level]
+
     return {
         "manifest": expert_registry.generate_manifest(),
         "agents": [
-            {"name": p.name, "display_name": p.display_name, "description": p.description, "role": p.role, "skill_plugin": p.skill_plugin}
-            for p in expert_registry.list_profiles()
+            {"name": p.name, "display_name": p.display_name, "description": p.description,
+             "role": p.role, "skill_plugin": p.skill_plugin, "type": p.type, "source": p.source}
+            for p in visible
         ],
     }
 
 
 @app.post("/api/agents/{name}/chat", response_model=ExpertChatResponse)
 async def chat_with_expert(name: str, request: ExpertChatRequest, authorization: str = Header(default=None)):
-    """Chat directly with a specific expert agent."""
+    """Chat directly with a specific expert agent.
+
+    Internal agents: creates a LangChain Agent with the profile configuration.
+    External agents: proxies the request to the external endpoint via HTTP.
+    """
     auth_header = authorization or ""
     token = auth_header.replace("Bearer ", "") if auth_header.startswith("Bearer ") else ""
     api_key = auth_header if not auth_header.startswith("Bearer ") else ""
@@ -491,10 +535,46 @@ async def chat_with_expert(name: str, request: ExpertChatRequest, authorization:
     if not profile:
         raise HTTPException(status_code=404, detail=f"Expert agent '{name}' not found")
 
+    # Check role visibility
+    agent_role = UserRole(profile.role)
+    if agent_role.level > user_ctx.role.level:
+        raise HTTPException(status_code=403, detail="无权访问该专家智能体")
+
     user_ctx.user_id = request.user_id or user_ctx.user_id
     user_ctx.agent_id = name
     user_ctx.session_id = request.session_id or str(uuid.uuid4())
 
+    # ── External agent: proxy to remote endpoint ──
+    if profile.is_external and profile.endpoint:
+        ext = ExternalEndpoint(
+            url=profile.endpoint.url,
+            protocol=profile.endpoint.protocol,
+            method=profile.endpoint.method,
+            auth_type=profile.endpoint.auth_type,
+            auth_credential=profile.endpoint.auth_credential,
+            auth_header_name=profile.endpoint.auth_header_name,
+            timeout_seconds=profile.endpoint.timeout_seconds,
+            headers=profile.endpoint.headers,
+        )
+        proxy = AgentProxyHandler(ext, ext.protocol)
+        result = await proxy.invoke(request.content, user_ctx.user_id, user_ctx.session_id)
+        await proxy.close()
+
+        if result.error:
+            raise HTTPException(status_code=result.status_code, detail=result.error)
+
+        # Persist the exchange
+        session_persistence.write_message(
+            user_ctx.user_id, user_ctx.session_id,
+            {"timestamp": "", "type": "human", "content": request.content}, agent_id=name,
+        )
+        session_persistence.write_message(
+            user_ctx.user_id, user_ctx.session_id,
+            {"timestamp": "", "type": "ai", "content": result.content}, agent_id=name,
+        )
+        return ExpertChatResponse(content=result.content, session_id=user_ctx.session_id)
+
+    # ── Internal agent: create LangChain Agent ──
     root = Path(config.project_root)
     soul_content = expert_registry.load_soul_content(name, root)
 
@@ -513,7 +593,6 @@ async def chat_with_expert(name: str, request: ExpertChatRequest, authorization:
             config={"configurable": {"context": user_ctx}},
         )
 
-        # Persist messages to session file
         for msg in result.get("messages", []):
             session_persistence.write_message(user_ctx.user_id, user_ctx.session_id, msg, agent_id=name)
 
@@ -658,18 +737,42 @@ async def disconnect_mcp_server(name: str, authorization: str = Header(default=N
 
 
 @app.get("/api/mcp/tools")
-async def list_mcp_tools(role: str = ""):
-    """List all discovered MCP tools, optionally filtered by role."""
-    all_tools = mcp_manager.get_all_tools_info()
-    if role:
-        from runtime.context_schema import UserRole
-        from harness.security.rbac import get_role_mcp_tool_access
-        allowed = get_role_mcp_tool_access().get(UserRole(role), [])
-        # Admin wildcard: show all
-        if "*" not in allowed:
-            all_tools = [t for t in all_tools if t.full_name in allowed or any(
+async def list_mcp_tools(role: str = "", authorization: str = Header(default=None)):
+    """List discovered MCP tools filtered by the caller's role.
+    Requires auth. Returns only tools the caller's role is allowed to use."""
+    user_ctx = authenticate_optional(authorization)
+    if user_ctx is None:
+        return {"tools": []}
+
+    from harness.security.rbac import get_role_mcp_tool_access
+    allowed = get_role_mcp_tool_access().get(user_ctx.role, [])
+
+    # Admin wildcard: show all
+    if "*" in allowed:
+        all_tools = mcp_manager.get_all_tools_info()
+    else:
+        all_tools = [
+            t for t in mcp_manager.get_all_tools_info()
+            if t.full_name in allowed or any(
                 p.endswith(":*") and t.full_name.startswith(p[:-2] + ":") for p in allowed
-            )]
+            )
+        ]
+
+    # Further filter by requested role (for admin viewing other roles)
+    if role:
+        try:
+            target = UserRole(role)
+            target_allowed = get_role_mcp_tool_access().get(target, [])
+            if "*" not in target_allowed and "*" not in allowed:
+                all_tools = [
+                    t for t in all_tools
+                    if t.full_name in target_allowed or any(
+                        p.endswith(":*") and t.full_name.startswith(p[:-2] + ":") for p in target_allowed
+                    )
+                ]
+        except ValueError:
+            pass
+
     return {
         "tools": [{"server_name": t.server_name, "tool_name": t.tool_name, "full_name": t.full_name,
                     "description": t.description} for t in all_tools]
@@ -679,16 +782,29 @@ async def list_mcp_tools(role: str = ""):
 # --- Expert Agent CRUD API (admin only) ---
 
 
+class AgentEndpointRequest(BaseModel):
+    url: str
+    protocol: str = "openai-chat"
+    method: str = "POST"
+    auth_type: str = "none"
+    auth_credential: str = ""
+    auth_header_name: str = "Authorization"
+    timeout_seconds: int = 120
+    headers: dict[str, str] = {}
+
+
 class CreateAgentRequest(BaseModel):
     name: str
     display_name: str
     description: str
     soul_content: str = ""
     role: str = "operator"
+    type: str = "internal"
     skills: list[str] = []
     mcp_tools: list[str] = []
     model_preference: str = "primary"
     max_context_tokens: int = 32000
+    endpoint: AgentEndpointRequest | None = None
 
 
 class UpdateAgentRequest(BaseModel):
@@ -696,10 +812,12 @@ class UpdateAgentRequest(BaseModel):
     description: str | None = None
     soul_content: str | None = None
     role: str | None = None
+    type: str | None = None
     skills: list[str] | None = None
     mcp_tools: list[str] | None = None
     model_preference: str | None = None
     max_context_tokens: int | None = None
+    endpoint: AgentEndpointRequest | None = None
 
 
 @app.get("/api/agents/manage")
@@ -712,7 +830,9 @@ async def list_manageable_agents(authorization: str = Header(default=None)):
                 "name": p.name, "display_name": p.display_name, "description": p.description,
                 "role": p.role, "skill_plugin": p.skill_plugin, "model_preference": p.model_preference,
                 "max_context_tokens": p.max_context_tokens, "skills": p.skills, "mcp_tools": p.mcp_tools,
-                "source": p.source, "created_by": p.created_by, "created_at": p.created_at, "updated_at": p.updated_at,
+                "source": p.source, "type": p.type,
+                "endpoint": p.endpoint.model_dump() if p.endpoint else None,
+                "created_by": p.created_by, "created_at": p.created_at, "updated_at": p.updated_at,
             }
             for p in expert_registry.list_profiles()
         ]
@@ -721,39 +841,59 @@ async def list_manageable_agents(authorization: str = Header(default=None)):
 
 @app.post("/api/agents/manage")
 async def create_agent(req: CreateAgentRequest, authorization: str = Header(default=None)):
-    """Create a new expert agent (admin only)."""
+    """Create a new expert agent (admin only). Supports internal and external types."""
     user_ctx = require_admin(authorization)
 
-    # Validate name uniqueness
     if expert_registry.get(req.name):
         raise HTTPException(status_code=409, detail=f"Agent '{req.name}' already exists")
 
-    # Validate skills and MCP tools against role
+    is_external = req.type == "external"
+
     from harness.expert.validator import ExpertAgentValidator
-    valid_skills = ExpertAgentValidator.validate_skills_from_profile(req.role, req.skills)
-    valid_mcp = ExpertAgentValidator.validate_mcp_tools_from_profile(req.role, req.mcp_tools)
 
-    # Save SOUL.md
-    soul_path = expert_registry.store.save_soul(req.name, req.soul_content)
+    if is_external:
+        # External agents don't need SOUL/Skills/MCP — they have their own
+        valid_skills = []
+        valid_mcp = []
+        soul_path = ""
+    else:
+        valid_skills = ExpertAgentValidator.validate_skills_from_profile(req.role, req.skills)
+        valid_mcp = ExpertAgentValidator.validate_mcp_tools_from_profile(req.role, req.mcp_tools)
+        soul_path = str(expert_registry.store.save_soul(req.name, req.soul_content))
 
-    # Build and save profile
+    # Build endpoint config
+    endpoint_config = None
+    if is_external and req.endpoint:
+        endpoint_config = EndpointConfig(
+            url=req.endpoint.url,
+            protocol=req.endpoint.protocol,
+            method=req.endpoint.method,
+            auth_type=req.endpoint.auth_type,
+            auth_credential=req.endpoint.auth_credential,
+            auth_header_name=req.endpoint.auth_header_name,
+            timeout_seconds=req.endpoint.timeout_seconds,
+            headers=req.endpoint.headers,
+        )
+
     profile = AgentProfile(
         name=req.name,
         display_name=req.display_name,
         description=req.description,
-        soul_file=str(soul_path),
+        soul_file=soul_path,
         role=req.role,
+        type=req.type,
         skills=valid_skills,
         mcp_tools=valid_mcp,
         model_preference=req.model_preference,
         max_context_tokens=req.max_context_tokens,
+        endpoint=endpoint_config,
         source="api",
         created_by=user_ctx.user_id,
     )
     expert_registry.store.save(profile)
     expert_registry.register(profile)
 
-    logger.info("expert_agent_created", name=req.name, role=req.role, skills=len(valid_skills), mcp_tools=len(valid_mcp), by=user_ctx.user_id)
+    logger.info("expert_agent_created", name=req.name, type=req.type, role=req.role, by=user_ctx.user_id)
     return {"message": f"Agent '{req.name}' created", "agent": profile.model_dump()}
 
 
@@ -772,7 +912,7 @@ async def get_agent(name: str, authorization: str = Header(default=None)):
 
 @app.put("/api/agents/manage/{name}")
 async def update_agent(name: str, req: UpdateAgentRequest, authorization: str = Header(default=None)):
-    """Update an expert agent (admin only, API-created only)."""
+    """Update an expert agent (admin only, API-created only). Supports internal and external types."""
     user_ctx = require_admin(authorization)
     profile = expert_registry.get(name)
     if not profile:
@@ -780,34 +920,73 @@ async def update_agent(name: str, req: UpdateAgentRequest, authorization: str = 
     if profile.source == "file":
         raise HTTPException(status_code=403, detail="Cannot modify file-based agents. Edit the profile.yaml directly.")
 
-    # Update fields
     if req.display_name is not None:
         profile.display_name = req.display_name
     if req.description is not None:
         profile.description = req.description
     if req.role is not None:
         profile.role = req.role
-    if req.skills is not None:
-        from harness.expert.validator import ExpertAgentValidator
+    if req.type is not None:
+        profile.type = req.type
+
+    from harness.expert.validator import ExpertAgentValidator
+
+    # If switching to external, skip skill/mcp/soul validation
+    is_external = profile.type == "external"
+
+    if req.skills is not None and not is_external:
         profile.skills = ExpertAgentValidator.validate_skills_from_profile(profile.role, req.skills)
-    if req.mcp_tools is not None:
-        from harness.expert.validator import ExpertAgentValidator
+    if req.mcp_tools is not None and not is_external:
         profile.mcp_tools = ExpertAgentValidator.validate_mcp_tools_from_profile(profile.role, req.mcp_tools)
     if req.model_preference is not None:
         profile.model_preference = req.model_preference
     if req.max_context_tokens is not None:
         profile.max_context_tokens = req.max_context_tokens
 
-    if req.soul_content is not None:
+    if req.soul_content is not None and not is_external:
         expert_registry.store.save_soul(name, req.soul_content)
         profile.soul_file = str(expert_registry.store.get_soul_path(name))
+
+    if req.endpoint is not None:
+        profile.endpoint = EndpointConfig(
+            url=req.endpoint.url, protocol=req.endpoint.protocol,
+            method=req.endpoint.method, auth_type=req.endpoint.auth_type,
+            auth_credential=req.endpoint.auth_credential,
+            auth_header_name=req.endpoint.auth_header_name,
+            timeout_seconds=req.endpoint.timeout_seconds,
+            headers=req.endpoint.headers,
+        )
 
     profile.updated_at = ""
     expert_registry.store.save(profile)
     expert_registry.register(profile)
 
-    logger.info("expert_agent_updated", name=name, by=user_ctx.user_id)
+    logger.info("expert_agent_updated", name=name, type=profile.type, by=user_ctx.user_id)
     return {"message": f"Agent '{name}' updated", "agent": profile.model_dump()}
+
+
+@app.post("/api/agents/manage/{name}/test-connection")
+async def test_agent_connection(name: str, authorization: str = Header(default=None)):
+    """Test connectivity to an external agent's endpoint (admin only)."""
+    require_admin(authorization)
+    profile = expert_registry.get(name)
+    if not profile:
+        raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
+    if not profile.is_external or not profile.endpoint:
+        raise HTTPException(status_code=400, detail="Only external agents support connection testing")
+
+    ext = ExternalEndpoint(
+        url=profile.endpoint.url, protocol=profile.endpoint.protocol,
+        method=profile.endpoint.method, auth_type=profile.endpoint.auth_type,
+        auth_credential=profile.endpoint.auth_credential,
+        auth_header_name=profile.endpoint.auth_header_name,
+        timeout_seconds=profile.endpoint.timeout_seconds,
+        headers=profile.endpoint.headers,
+    )
+    proxy = AgentProxyHandler(ext, ext.protocol)
+    result = await proxy.test_connection()
+    await proxy.close()
+    return result
 
 
 @app.delete("/api/agents/manage/{name}")
@@ -830,12 +1009,24 @@ async def delete_agent(name: str, authorization: str = Header(default=None)):
 
 
 @app.get("/api/roles/{role}/skills")
-async def get_role_skills(role: str):
-    """List skills available for a specific role (used in agent creation form)."""
+async def get_role_skills(role: str, authorization: str = Header(default=None)):
+    """List skills available for a specific role (used in agent creation form).
+    Requires auth. User can only query roles at or below their own level."""
+    user_ctx = authenticate_optional(authorization)
+    if user_ctx is None:
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    try:
+        target_role = UserRole(role)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Invalid role: {role}")
+
+    # Prevent privilege escalation: can only query own level or below
+    if target_role.level > user_ctx.role.level:
+        target_role = user_ctx.role
+
     from harness.skill.types import SkillAccess
-    max_level = SkillAccess.max_for_role(role)
-    all_skills = skill_manager.generate_manifest()
-    # Get skill info with access levels
+    max_level = SkillAccess.max_for_role(target_role.value)
     skill_list = skill_manager.list_skills() if hasattr(skill_manager, 'list_skills') else []
     result = []
     for skill in skill_list:
@@ -849,20 +1040,28 @@ async def get_role_skills(role: str):
             "access": skill.access.value if hasattr(skill, 'access') else "unknown",
             "allowed": allowed,
         })
-    return {"role": role, "skill_access": ExpertAgentValidator.get_role_skill_level(role), "skills": result}
+    return {"role": target_role.value, "skill_access": ExpertAgentValidator.get_role_skill_level(target_role.value), "skills": result}
 
 
 @app.get("/api/roles/{role}/mcp-tools")
-async def get_role_mcp_tools(role: str):
-    """List MCP tools available for a specific role (used in agent creation form)."""
-    from runtime.context_schema import UserRole
-    from harness.expert.validator import ExpertAgentValidator
+async def get_role_mcp_tools(role: str, authorization: str = Header(default=None)):
+    """List MCP tools available for a specific role (used in agent creation form).
+    Requires auth. User can only query roles at or below their own level."""
+    user_ctx = authenticate_optional(authorization)
+    if user_ctx is None:
+        raise HTTPException(status_code=401, detail="Authentication required")
+
     try:
-        role_enum = UserRole(role)
+        target_role = UserRole(role)
     except ValueError:
         raise HTTPException(status_code=400, detail=f"Invalid role: {role}")
 
-    allowed = ExpertAgentValidator.get_role_mcp_tools(role)
+    # Prevent privilege escalation: can only query own level or below
+    if target_role.level > user_ctx.role.level:
+        target_role = user_ctx.role
+
+    from harness.expert.validator import ExpertAgentValidator
+    allowed = ExpertAgentValidator.get_role_mcp_tools(target_role.value)
     all_tools = mcp_manager.get_all_tools_info()
 
     result = []
@@ -879,7 +1078,7 @@ async def get_role_mcp_tools(role: str):
             "description": tool.description,
             "allowed": tool_allowed,
         })
-    return {"role": role, "mcp_tools": result}
+    return {"role": target_role.value, "mcp_tools": result}
 
 
 # --- Evolution & Plugin API (Phase 3) ---
@@ -1141,16 +1340,40 @@ async def ws_chat(websocket: WebSocket):
         # Init workspace
         memory_manager.init_user(user_ctx.user_id)
 
-        # Create agent: expert agent if agent_id specified, otherwise generic
+        # Determine agent type: external (proxy) vs internal (LangChain) vs generic
+        is_external = False
+        external_proxy = None
+        profile = None
+
         if agent_id and expert_registry.get(agent_id):
             profile = expert_registry.get(agent_id)
-            root = Path(config.project_root)
-            soul_content = expert_registry.load_soul_content(agent_id, root)
-            agent = create_expert_agent(
-                profile, soul_content, user_ctx, config,
-                memory_manager, skill_manager, approval_checker, sandbox_runner,
-            )
-            logger.info("agent_created", agent_type="expert", agent_id=agent_id, user_id=user_id, session_id=user_ctx.session_id)
+            agent_role = UserRole(profile.role)
+            if agent_role.level > user_ctx.role.level:
+                await websocket.send_text(json.dumps({"type": "error", "content": "无权访问该专家智能体"}))
+                await websocket.close(code=4003)
+                return
+
+            if profile.is_external and profile.endpoint:
+                is_external = True
+                ext = ExternalEndpoint(
+                    url=profile.endpoint.url, protocol=profile.endpoint.protocol,
+                    method=profile.endpoint.method, auth_type=profile.endpoint.auth_type,
+                    auth_credential=profile.endpoint.auth_credential,
+                    auth_header_name=profile.endpoint.auth_header_name,
+                    timeout_seconds=profile.endpoint.timeout_seconds,
+                    headers=profile.endpoint.headers,
+                )
+                external_proxy = AgentProxyHandler(ext, ext.protocol)
+                logger.info("agent_created", agent_type="external", agent_id=agent_id, user_id=user_id)
+            else:
+                root = Path(config.project_root)
+                soul_content = expert_registry.load_soul_content(agent_id, root)
+                agent = create_expert_agent(
+                    profile, soul_content, user_ctx, config,
+                    memory_manager, skill_manager, approval_checker, sandbox_runner,
+                    mcp_manager=mcp_manager,
+                )
+                logger.info("agent_created", agent_type="expert", agent_id=agent_id, user_id=user_id, session_id=user_ctx.session_id)
         else:
             agent = create_agent_for_user(user_ctx, config, memory_manager, skill_manager, approval_checker, sandbox_runner, mcp_manager=mcp_manager)
             logger.info("agent_created", agent_type="generic", user_id=user_id, session_id=user_ctx.session_id)
@@ -1161,11 +1384,12 @@ async def ws_chat(websocket: WebSocket):
             "user_id": user_ctx.user_id,
             "session_id": user_ctx.session_id,
             "agent_id": agent_id,
+            "agent_type": "external" if is_external else ("expert" if profile else "generic"),
         }))
 
         logger.info("ws_connected", user_id=user_ctx.user_id, session_id=user_ctx.session_id)
 
-        # Chat loop — reuse the same agent instance
+        # Chat loop
         while True:
             data = await websocket.receive_text()
             msg_data = json.loads(data)
@@ -1176,30 +1400,46 @@ async def ws_chat(websocket: WebSocket):
 
             logger.info("chat_message_received", user_id=user_id, session_id=user_ctx.session_id, agent_id=agent_id, msg_len=len(user_message))
 
-            # Stream response using the session-persistent agent
-            # stream_mode="updates" returns {node_name: {"messages": [...]}} per chunk
-            for chunk in agent.stream(
-                {"messages": [{"role": "user", "content": user_message}]},
-                config={"configurable": {"context": user_ctx}},
-                stream_mode="updates",
-            ):
-                for node_output in chunk.values():
-                    if not node_output or not isinstance(node_output, dict):
-                        continue
-                    for msg in node_output.get("messages", []):
-                        session_persistence.write_message(user_ctx.user_id, user_ctx.session_id, msg, agent_id=agent_id)
-                        if hasattr(msg, "content") and msg.content and getattr(msg, "type", None) == "ai":
-                            await websocket.send_text(json.dumps({
-                                "type": "chunk",
-                                "content": msg.content,
-                            }))
-                        if hasattr(msg, "tool_calls") and msg.tool_calls:
-                            for tc in msg.tool_calls:
+            if is_external:
+                # ── External agent: stream via HTTP proxy ──
+                full_response = ""
+                async for chunk_text in external_proxy.stream(user_message, user_ctx.user_id, user_ctx.session_id):
+                    full_response += chunk_text
+                    await websocket.send_text(json.dumps({"type": "chunk", "content": chunk_text}))
+
+                # Persist exchange
+                session_persistence.write_message(
+                    user_ctx.user_id, user_ctx.session_id,
+                    {"timestamp": "", "type": "human", "content": user_message}, agent_id=agent_id,
+                )
+                session_persistence.write_message(
+                    user_ctx.user_id, user_ctx.session_id,
+                    {"timestamp": "", "type": "ai", "content": full_response}, agent_id=agent_id,
+                )
+            else:
+                # ── Internal agent: LangChain stream ──
+                for chunk in agent.stream(
+                    {"messages": [{"role": "user", "content": user_message}]},
+                    config={"configurable": {"context": user_ctx}},
+                    stream_mode="updates",
+                ):
+                    for node_output in chunk.values():
+                        if not node_output or not isinstance(node_output, dict):
+                            continue
+                        for msg in node_output.get("messages", []):
+                            session_persistence.write_message(user_ctx.user_id, user_ctx.session_id, msg, agent_id=agent_id)
+                            if hasattr(msg, "content") and msg.content and getattr(msg, "type", None) == "ai":
                                 await websocket.send_text(json.dumps({
-                                    "type": "tool_call",
-                                    "name": tc.get("name", ""),
-                                    "args": tc.get("args", {}),
+                                    "type": "chunk",
+                                    "content": msg.content,
                                 }))
+                            if hasattr(msg, "tool_calls") and msg.tool_calls:
+                                for tc in msg.tool_calls:
+                                    await websocket.send_text(json.dumps({
+                                        "type": "tool_call",
+                                        "name": tc.get("name", ""),
+                                        "args": tc.get("args", {}),
+                                    }))
 
             # Send completion signal
             await websocket.send_text(json.dumps({"type": "done"}))
@@ -1212,6 +1452,9 @@ async def ws_chat(websocket: WebSocket):
             await websocket.send_text(json.dumps({"type": "error", "content": str(e)}))
         except Exception:
             pass
+    finally:
+        if external_proxy:
+            await external_proxy.close()
 
 
 # Mount frontend static files in production mode

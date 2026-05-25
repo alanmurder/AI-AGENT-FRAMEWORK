@@ -1,3 +1,5 @@
+import type { AgentEndpointRequest } from './api';
+
 export interface AgentProfile {
   name: string;
   display_name: string;
@@ -10,6 +12,8 @@ export interface AgentProfile {
   skills: string[];
   mcp_tools: string[];
   source: string;
+  type: string;
+  endpoint?: AgentEndpointRequest;
   created_by?: string;
   created_at?: string;
   updated_at?: string;

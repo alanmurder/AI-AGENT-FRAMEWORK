@@ -24,6 +24,7 @@ dependencies = [
     "duckduckgo-search>=8.0.0",
     "bcrypt>=4.0.0",
     "mcp>=1.0.0",
+    "httpx>=0.28.0",
 ]
 
 [project.optional-dependencies]
@@ -32,7 +33,7 @@ llm-anthropic = ["langchain-anthropic>=0.3.0"]
 llm-zhipu = ["langchain-community>=0.3.0"]
 pg = ["asyncpg>=0.30.0", "pgvector>=0.3.0"]
 sandbox = ["docker>=7.0.0"]
-dev = ["pytest>=8.3.0", "pytest-asyncio>=0.24.0", "httpx>=0.28.0", "ruff>=0.8.0"]
+dev = ["pytest>=8.3.0", "pytest-asyncio>=0.24.0", "ruff>=0.8.0"]
 prod = ["gunicorn>=23.0.0"]
 
 [build-system]

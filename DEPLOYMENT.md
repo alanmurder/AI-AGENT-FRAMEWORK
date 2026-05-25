@@ -313,6 +313,10 @@ AI_AGENT_SANDBOX_ENABLED=false
 # 服务端配置存储在 data/mcp_servers.json
 # 支持 stdio 和 SSE 两种传输方式
 
+# 外部智能体接入（通过 Web UI 管理面板注册，admin 权限）
+# 端点配置存储在 data/agents/{name}.json
+# 仅需注册端点 URL 和协议，无需配置 Skill/MCP/Soul
+
 # PostgreSQL 中期记忆（Phase 2）
 PG_HOST=localhost
 PG_PORT=5432

@@ -148,16 +148,29 @@ export interface MCPServerDetail {
 }
 
 // Expert agent CRUD types
+export interface AgentEndpointRequest {
+  url: string;
+  protocol: string;
+  method: string;
+  auth_type: string;
+  auth_credential: string;
+  auth_header_name: string;
+  timeout_seconds: number;
+  headers: Record<string, string>;
+}
+
 export interface CreateAgentRequest {
   name: string;
   display_name: string;
   description: string;
   soul_content: string;
   role: UserRole;
+  type?: string;
   skills: string[];
   mcp_tools: string[];
   model_preference?: string;
   max_context_tokens?: number;
+  endpoint?: AgentEndpointRequest;
 }
 
 export interface UpdateAgentRequest {
@@ -165,10 +178,19 @@ export interface UpdateAgentRequest {
   description?: string;
   soul_content?: string;
   role?: UserRole;
+  type?: string;
   skills?: string[];
   mcp_tools?: string[];
   model_preference?: string;
   max_context_tokens?: number;
+  endpoint?: AgentEndpointRequest;
+}
+
+export interface TestConnectionResult {
+  reachable: boolean;
+  status_code?: number;
+  response_preview?: string;
+  error?: string;
 }
 
 export interface RoleSkillInfo {

@@ -10,6 +10,15 @@ class UserRole(str, Enum):
     OPERATOR = "operator"
     VIEWER = "viewer"
 
+    @property
+    def level(self) -> int:
+        _order = {"admin": 3, "manager": 2, "operator": 1, "viewer": 0}
+        return _order[self.value]
+
+    def can_access(self, target_role: "UserRole") -> bool:
+        """Check if this role can access resources of target_role level."""
+        return self.level >= target_role.level
+
 
 @dataclass
 class UserContext:
