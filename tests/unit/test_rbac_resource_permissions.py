@@ -40,6 +40,20 @@ def _configure(monkeypatch, tmp_path, config: dict):
     return path
 
 
+def _import_server(monkeypatch):
+    from runtime import models
+
+    monkeypatch.setattr(
+        models,
+        "create_mini_model",
+        lambda config: SimpleNamespace(),
+    )
+
+    from gateway import server
+
+    return server
+
+
 def teardown_function():
     rbac.clear_rbac_caches()
 
@@ -317,9 +331,35 @@ def test_expert_validator_filters_profile_skills_with_exact_rbac(
 
     assert ExpertAgentValidator.validate_skills_from_profile(
         "operator",
-        ["file_manager", "database_query"],
+        ["file_manager", "database_query", "future_skill"],
         all_skills,
     ) == ["file_manager"]
+
+
+def test_expert_validator_keeps_unknown_skills_only_without_known_skill_list(
+    tmp_path, monkeypatch
+):
+    _configure(
+        monkeypatch,
+        tmp_path,
+        {
+            "rbac": {
+                "roles": {
+                    "operator": {"skills": [], "skill_access": "all"},
+                }
+            }
+        },
+    )
+
+    assert ExpertAgentValidator.validate_skills_from_profile(
+        "operator",
+        ["future_skill"],
+        [],
+    ) == []
+    assert ExpertAgentValidator.validate_skills_from_profile(
+        "operator",
+        ["future_skill"],
+    ) == ["future_skill"]
 
 
 @pytest.mark.asyncio
@@ -343,7 +383,7 @@ async def test_create_agent_passes_known_skills_to_validator(tmp_path, monkeypat
         },
     )
 
-    from gateway import server
+    server = _import_server(monkeypatch)
 
     captured = {}
 
@@ -380,7 +420,7 @@ async def test_create_agent_passes_known_skills_to_validator(tmp_path, monkeypat
         display_name="Agent",
         description="Agent desc",
         role="operator",
-        skills=["file_manager", "database_query"],
+        skills=["file_manager", "database_query", "future_skill"],
         mcp_tools=[],
     )
 
@@ -418,7 +458,7 @@ async def test_update_agent_refilters_existing_skills_when_role_changes(
         },
     )
 
-    from gateway import server
+    server = _import_server(monkeypatch)
 
     profile = AgentProfile(
         name="agent",
@@ -463,3 +503,77 @@ async def test_update_agent_refilters_existing_skills_when_role_changes(
     assert response["agent"]["role"] == "operator"
     assert response["agent"]["skills"] == ["file_manager"]
     assert captured["profile"].skills == ["file_manager"]
+
+
+@pytest.mark.asyncio
+async def test_update_agent_refilters_existing_mcp_tools_when_role_changes(
+    tmp_path, monkeypatch
+):
+    _configure(
+        monkeypatch,
+        tmp_path,
+        {
+            "rbac": {
+                "roles": {
+                    "admin": {"skills": ["*"], "skill_access": "all", "mcp_tools": ["*"]},
+                    "manager": {
+                        "skills": [],
+                        "skill_access": "all",
+                        "mcp_tools": ["filesystem:read", "database:query"],
+                    },
+                    "operator": {
+                        "skills": [],
+                        "skill_access": "all",
+                        "mcp_tools": ["filesystem:read"],
+                    },
+                }
+            }
+        },
+    )
+
+    server = _import_server(monkeypatch)
+
+    profile = AgentProfile(
+        name="agent",
+        display_name="Agent",
+        description="Agent desc",
+        soul_file="agent.md",
+        role="manager",
+        skills=[],
+        mcp_tools=["filesystem:read", "database:query"],
+        source="api",
+    )
+    captured = {}
+
+    class FakeStore:
+        def save(self, saved_profile):
+            captured["profile"] = saved_profile
+
+    class FakeRegistry:
+        store = FakeStore()
+
+        def get(self, name):
+            return profile
+
+        def register(self, saved_profile):
+            captured["registered"] = saved_profile
+
+    monkeypatch.setattr(
+        server,
+        "require_admin",
+        lambda authorization=None: UserContext(user_id="admin", role=UserRole.ADMIN),
+    )
+    monkeypatch.setattr(server, "expert_registry", FakeRegistry())
+    monkeypatch.setattr(
+        server,
+        "skill_manager",
+        SimpleNamespace(list_skills=lambda: []),
+    )
+
+    request = server.UpdateAgentRequest(role="operator")
+
+    response = await server.update_agent("agent", request)
+
+    assert response["agent"]["role"] == "operator"
+    assert response["agent"]["mcp_tools"] == ["filesystem:read"]
+    assert captured["profile"].mcp_tools == ["filesystem:read"]

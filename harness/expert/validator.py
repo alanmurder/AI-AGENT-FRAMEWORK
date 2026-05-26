@@ -25,9 +25,15 @@ class ExpertAgentValidator:
         rejected = []
         for skill_name in skills:
             skill_obj = skill_map.get(skill_name)
-            if skill_obj is None:
+            if skill_obj is None and all_skills is None:
                 skill_obj = ExpertAgentValidator._get_skill_info(skill_name)
-            if skill_obj is None or role_allows_skill(role_enum, skill_obj):
+            if skill_obj is None:
+                if all_skills is None:
+                    valid.append(skill_name)
+                else:
+                    rejected.append(skill_name)
+                continue
+            if role_allows_skill(role_enum, skill_obj):
                 valid.append(skill_name)
             else:
                 rejected.append(skill_name)

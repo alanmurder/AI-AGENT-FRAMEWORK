@@ -752,6 +752,10 @@ class MCPServerRequest(BaseModel):
     env: dict[str, str] = {}
 
 
+class ResourceRolesRequest(BaseModel):
+    roles: list[str]
+
+
 @app.get("/api/mcp/servers")
 async def list_mcp_servers():
     """List all configured MCP servers."""
@@ -893,6 +897,97 @@ async def disconnect_mcp_server(name: str, authorization: str = Header(default=N
     require_admin(authorization)
     await mcp_manager.disconnect_server(name)
     return {"status": "disconnected", "server": name}
+
+
+@app.get("/api/rbac/resources")
+async def list_rbac_resources(authorization: str = Header(default=None)):
+    """List skills and MCP servers with their RBAC role assignments."""
+    require_admin(authorization)
+
+    from harness.security import rbac
+
+    all_skills = skill_manager.list_skills() if hasattr(skill_manager, "list_skills") else []
+    servers = mcp_manager.list_servers()
+
+    return {
+        "roles": [role.value for role in UserRole],
+        "skills": [
+            {
+                "name": skill.name,
+                "description": skill.description,
+                "access": skill.access.value if hasattr(skill.access, "value") else str(skill.access),
+                "roles": [
+                    role.value
+                    for role in rbac.roles_for_skill(skill.name, all_skills)
+                ],
+            }
+            for skill in all_skills
+        ],
+        "mcp_servers": [
+            {
+                "name": server.name,
+                "enabled": server.enabled,
+                "roles": [
+                    role.value
+                    for role in rbac.roles_for_mcp_server(server.name)
+                ],
+            }
+            for server in servers
+        ],
+    }
+
+
+@app.put("/api/rbac/skills/{skill_name}/roles")
+async def update_skill_roles(
+    skill_name: str,
+    req: ResourceRolesRequest,
+    authorization: str = Header(default=None),
+):
+    """Update exact RBAC role assignments for a skill."""
+    require_admin(authorization)
+
+    from harness.security import rbac
+
+    all_skills = skill_manager.list_skills() if hasattr(skill_manager, "list_skills") else []
+    if not any(skill.name == skill_name for skill in all_skills):
+        raise HTTPException(status_code=404, detail=f"Skill '{skill_name}' not found")
+
+    try:
+        roles = rbac.normalize_roles(req.roles)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    rbac.set_skill_roles(skill_name, roles, all_skills)
+    return {
+        "name": skill_name,
+        "roles": [role.value for role in rbac.roles_for_skill(skill_name, all_skills)],
+    }
+
+
+@app.put("/api/rbac/mcp-servers/{server_name}/roles")
+async def update_mcp_server_roles(
+    server_name: str,
+    req: ResourceRolesRequest,
+    authorization: str = Header(default=None),
+):
+    """Update exact RBAC role assignments for an MCP server."""
+    require_admin(authorization)
+
+    if mcp_manager.get_server(server_name) is None:
+        raise HTTPException(status_code=404, detail=f"MCP server '{server_name}' not found")
+
+    from harness.security import rbac
+
+    try:
+        roles = rbac.normalize_roles(req.roles)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    rbac.set_mcp_server_roles(server_name, roles)
+    return {
+        "name": server_name,
+        "roles": [role.value for role in rbac.roles_for_mcp_server(server_name)],
+    }
 
 
 @app.get("/api/mcp/tools")
@@ -1101,8 +1196,11 @@ async def update_agent(name: str, req: UpdateAgentRequest, authorization: str = 
             req.skills if req.skills is not None else profile.skills,
             all_skills,
         )
-    if req.mcp_tools is not None and not is_external:
-        profile.mcp_tools = ExpertAgentValidator.validate_mcp_tools_from_profile(profile.role, req.mcp_tools)
+    if not is_external and (req.mcp_tools is not None or req.role is not None):
+        profile.mcp_tools = ExpertAgentValidator.validate_mcp_tools_from_profile(
+            profile.role,
+            req.mcp_tools if req.mcp_tools is not None else profile.mcp_tools,
+        )
     if req.model_preference is not None:
         profile.model_preference = req.model_preference
     if req.max_context_tokens is not None:
@@ -1190,20 +1288,17 @@ async def get_role_skills(role: str, authorization: str = Header(default=None)):
     if target_role.level > user_ctx.role.level:
         target_role = user_ctx.role
 
-    from harness.skill.types import SkillAccess
-    max_level = SkillAccess.max_for_role(target_role.value)
+    from harness.expert.validator import ExpertAgentValidator
+    from harness.security.rbac import role_allows_skill
+
     skill_list = skill_manager.list_skills() if hasattr(skill_manager, 'list_skills') else []
     result = []
     for skill in skill_list:
-        if hasattr(skill, 'access') and hasattr(skill.access, 'level'):
-            allowed = skill.access.level <= max_level
-        else:
-            allowed = True
         result.append({
             "name": skill.name if hasattr(skill, 'name') else str(skill),
             "description": skill.description if hasattr(skill, 'description') else "",
             "access": skill.access.value if hasattr(skill, 'access') else "unknown",
-            "allowed": allowed,
+            "allowed": role_allows_skill(target_role, skill),
         })
     return {"role": target_role.value, "skill_access": ExpertAgentValidator.get_role_skill_level(target_role.value), "skills": result}
 
