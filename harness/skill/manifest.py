@@ -76,11 +76,15 @@ class ManifestGenerator:
         self.builtin_dir = builtin_dir
         self.extension_dir = extension_dir
 
-    def generate(self, user_skill_access: str | None = None) -> SkillManifest:
+    def generate(
+        self, user_skill_access: str | None = None,
+        skill_names: list[str] | None = None,
+    ) -> SkillManifest:
         """Scan all skill directories and produce manifest.
 
-        If user_skill_access is provided (e.g. 'admin', 'operator'), filters
-        skills to only those visible at that access level.
+        user_skill_access: role key for access-level filtering (e.g. 'admin', 'operator').
+        skill_names: if provided (non-None), further filter to only these skill names.
+                     Empty list → no skills. None → all role-allowed skills.
         """
         all_skills = []
         all_skills.extend(scan_skills(self.builtin_dir))
@@ -90,8 +94,15 @@ class ManifestGenerator:
             max_level = SkillAccess.max_for_role(user_skill_access)
             all_skills = [s for s in all_skills if s.access.level <= max_level]
 
+        if skill_names is not None:
+            name_set = set(skill_names)
+            all_skills = [s for s in all_skills if s.name in name_set]
+
         return SkillManifest(skills=all_skills)
 
-    def generate_text(self, user_skill_access: str | None = None) -> str:
+    def generate_text(
+        self, user_skill_access: str | None = None,
+        skill_names: list[str] | None = None,
+    ) -> str:
         """Generate manifest text for prompt injection."""
-        return self.generate(user_skill_access).to_text()
+        return self.generate(user_skill_access, skill_names).to_text()

@@ -30,7 +30,7 @@ from gateway.types import ChannelType, AgentResponse
 from gateway.session import SessionPersistence
 from gateway.lane import LaneQueue
 from gateway.adapters.dingtalk import DingTalkAdapter
-from harness.sandbox.runner import SandboxRunner
+from harness.sandbox.manager import SandboxManager
 from harness.multi_agent.background import BackgroundTaskManager
 from harness.evolution.three_agent import ThreeAgentVerifier
 from harness.evolution.gepa import GEPAOptimizer
@@ -76,17 +76,26 @@ session_mgr = SessionManager()
 web_adapter = WebAdapter()
 session_persistence = SessionPersistence(config.get_memory_base_dir())
 heartbeat_scheduler = HeartbeatScheduler(config, interval_minutes=config.heartbeat_interval)
+
+# Memory heartbeat task — batch-extracts cross-session facts/prefs periodically
+from harness.memory.heartbeat import MemoryHeartbeatTask
+memory_heartbeat_task = MemoryHeartbeatTask(memory_manager, config)
+heartbeat_scheduler.register_async_task(memory_heartbeat_task, "memory_heartbeat")
 cron_scheduler = CronScheduler(config)
 lane_queue = LaneQueue()
 dingtalk_adapter = DingTalkAdapter()
-sandbox_runner = SandboxRunner()
+sandbox_runner = SandboxManager.from_config(config)
 background_manager = BackgroundTaskManager(config, memory_manager, skill_manager, approval_checker, sandbox_runner)
 
 # MCP manager
 from harness.mcp.manager import MCPManager
 from harness.middleware.tool_filter import set_mcp_manager
+from runtime.tools import set_background_manager
 mcp_manager = MCPManager(Path(config.project_root))
 set_mcp_manager(mcp_manager)
+
+# Register background_manager for submit_background_task tool access
+set_background_manager(background_manager)
 
 
 def authenticate_user(api_key: str = None, token: str = None) -> UserContext:
@@ -328,7 +337,12 @@ async def health():
         redis_ok = True
     except Exception:
         pass
-    return {"status": "ok", "version": "0.1.0", "redis": "connected" if redis_ok else "disconnected"}
+    return {
+        "status": "ok",
+        "version": "0.1.0",
+        "redis": "connected" if redis_ok else "disconnected",
+        "sandbox": sandbox_runner.healthcheck(),
+    }
 
 
 # --- Cron Task API ---

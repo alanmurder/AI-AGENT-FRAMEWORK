@@ -34,15 +34,17 @@ class SecurityCheckMiddleware(AgentMiddleware):
             user_ctx = request.runtime.context
 
         # Only check dangerous tools for security
-        if tool_name not in ("command_exec", "file_write", "query_database"):
+        if tool_name not in ("command_exec", "python_exec", "file_write", "query_database"):
             return handler(request)
 
         # Get the content to check
         content_to_check = ""
         if tool_name == "command_exec":
             content_to_check = tool_args.get("command", "")
+        elif tool_name == "python_exec":
+            content_to_check = tool_args.get("code", "")
         elif tool_name == "file_write":
-            content_to_check = tool_args.get("content", "")
+            content_to_check = tool_args.get("path", "")
         elif tool_name == "query_database":
             content_to_check = tool_args.get("sql", "")
 

@@ -161,7 +161,7 @@ approval_checker = ApprovalChecker(mini_model)
 expert_registry = AgentRegistry()
 expert_registry.scan_profiles(Path(config.project_root) / "agents")
 session_persistence = SessionPersistence(config.get_memory_base_dir())
-sandbox_runner = SandboxRunner()
+sandbox_runner = SandboxManager.from_config(config)
 background_manager = BackgroundTaskManager(...)
 heartbeat_scheduler / cron_scheduler / lane_queue / ...
 ```
@@ -172,18 +172,22 @@ heartbeat_scheduler / cron_scheduler / lane_queue / ...
 
 ### 3.1 Memory — 四层记忆系统
 
-**职责：** 让智能体在不同时间跨度上保持和利用信息。
+**职责：** 让智能体在不同时间跨度上保持和利用信息；管理从会话创建到归档的完整记忆生命周期。
 
 #### 关键文件
 
 | 文件 | 作用 |
 |------|------|
-| `harness/memory/manager.py` | `MemoryManager` — 四层协调器 |
-| `harness/memory/types.py` | 类型定义：`MemoryType`、`MemoryFile`、`MemoryContext` |
-| `harness/memory/long_term.py` | `LongTermMemory` — 文件系统持久化 |
-| `harness/memory/mid_term.py` | `MidTermMemory` — PostgreSQL + pgvector |
-| `harness/memory/short_term.py` | `ShortTermMemory` — Redis 会话缓存 |
-| `harness/memory/evolution.py` | `MemoryEvolution` — LLM 提取偏好/事实 |
+| `harness/memory/manager.py` | `MemoryManager` — 四层协调器，所有记忆操作的统一入口 |
+| `harness/memory/types.py` | 类型定义：`MemoryType`、`MemoryFile`(SOUL/USER/MEMORY)、`MemoryContext` |
+| `harness/memory/long_term.py` | `LongTermMemory` — 文件系统持久化（SOUL.md / USER.md / MEMORY.md / daily logs） |
+| `harness/memory/mid_term.py` | `MidTermMemory` — PostgreSQL + pgvector（会话摘要、事实向量、语义搜索） |
+| `harness/memory/short_term.py` | `ShortTermMemory` — Redis 会话缓存（TTL=3600s） |
+| `harness/memory/evolution.py` | `MemoryEvolution` — 用 Mini Model 从对话中提取偏好和事实 |
+| `gateway/session.py` | `SessionPersistence` — JSONL 文件实时追加，崩溃安全 |
+| `harness/middleware/memory_injection.py` | `MemoryInjectionMiddleware` — before_model 注入记忆上下文 |
+| `harness/middleware/memory_archive.py` | `MemoryArchiveMiddleware` — after_agent 归档+进化 |
+| `harness/context/flush.py` | `PreFlushMiddleware` — 上下文压缩前保存关键信息 |
 
 #### 四层架构
 
@@ -211,30 +215,185 @@ L4 工作记忆 (Working Memory)
   └─ 内容: 当前 tool_call 结果、中间推理
 ```
 
+#### 记忆生命周期全景
+
+```
+                    ┌─ 会话创建阶段 ─┐
+                    │                  │
+  用户连接 ──→ init_user(user_id)     │
+              ├─ 创建 workspace 目录  │
+              ├─ 写入默认 SOUL.md     │  ← 仅首次（文件不存在时）
+              └─ 写入默认 USER.md     │
+                    │                  │
+                    ▼                  │
+  ┌──────── 消息处理循环 ──────────────────────────────────────────┐
+  │                                                                 │
+  │  ┌─ BEFORE MODEL ─┐                                            │
+  │  │                  │                                           │
+  │  │ MemoryInjectionMiddleware.before_model()                     │
+  │  │  ├─ 每个会话仅注入一次（_injected_sessions 去重）           │
+  │  │  │   ├─ long_term.load_context(user_id)                     │
+  │  │  │   │   ├─ 读取 SOUL.md → 智能体人格                       │
+  │  │  │   │   ├─ 读取 USER.md  → 用户偏好                        │
+  │  │  │   │   ├─ 读取 MEMORY.md → 关键事实                        │
+  │  │  │   │   └─ 读取 daily log → 近期上下文                     │
+  │  │  │   │                                                      │
+  │  │  │   ├─ skill_manager.generate_manifest(role)               │
+  │  │  │   │   └─ 按角色 skill_access 过滤 SKILL.md 清单          │
+  │  │  │   │                                                      │
+  │  │  │   └─ plugin_manager.generate_plugin_manifest()           │
+  │  │  │       └─ 仅插件 > 3 时注入 PLUGIN.md 摘要                │
+  │  │  │                                                          │
+  │  │  └─ 异步版 (abefore_model) 额外：                           │
+  │  │      ├─ mid_term.search(query=last_user_msg, top_k=5)       │
+  │  │      │   └─ pgvector 语义搜索历史相关记忆                   │
+  │  │      └─ 附加到 MemoryContext.mid_term_results                │
+  │  │                                                              │
+  │  │  注入内容 = MemoryContext.to_prompt_section()                │
+  │  │    格式: "--- MEMORY CONTEXT ---\n## Agent Personality..."   │
+  │  │    以 SystemMessage 形式插入 messages 列表                  │
+  │  │                                                              │
+  │  ├─ LLM 调用（使用注入后的完整上下文）                          │
+  │  │                                                              │
+  │  ├─ 实时持久化 ─┐                                              │
+  │  │               │                                              │
+  │  │  session_persistence.write_message(user_id, session_id, msg) │
+  │  │    ├─ JSONL 追加写入 (data/sessions/{user_id}/{sid}.jsonl)  │
+  │  │    ├─ HumanMessage → {type:"human", content:"...", ...}     │
+  │  │    ├─ AIMessage    → {type:"ai", content:"...", tool_calls} │
+  │  │    └─ ToolMessage  → {type:"tool", content:"...", name}     │
+  │  │    ★ 每条消息产生即写盘，崩溃不丢数据                       │
+  │  │                                                              │
+  │  ├─ PreFlush 检查 ─┐                                           │
+  │  │                  │                                           │
+  │  │  token_count > flush_threshold × 0.9 ？                     │
+  │  │    ├─ YES → 注入 FLUSH_WARNING:                              │
+  │  │    │   "上下文即将压缩，请用 memory_manage 保存关键信息"     │
+  │  │    └─ NO  → 跳过                                            │
+  │  │                                                              │
+  │  │  token_count > flush_threshold ？                            │
+  │  │    ├─ YES → PreFlushMiddleware.wrap_model_call()            │
+  │  │    │   1. 注入 _FLUSH_PROMPT (HumanMessage)                 │
+  │  │    │   2. 调用模型 → Agent 使用 memory_manage 保存信息      │
+  │  │    │   3. 等待 Agent 保存完成                                │
+  │  │    │   4. 标记 flush_triggered (Redis 防重复)               │
+  │  │    │   5. SummarizationMiddleware 随后压缩                   │
+  │  │    └─ NO  → 跳过                                            │
+  │  │                                                              │
+  │  └─ 压缩（SummarizationMiddleware）                             │
+  │      ├─ 策略1: Summarization — Mini Model 生成对话摘要         │
+  │      ├─ 策略2: ContextEditing — 删除低价值消息                 │
+  │      ├─ 策略3: Placeholder — 大工具输出替换为文件引用          │
+  │      └─ keep_recent_messages=20 — 压缩时保留最近 20 条         │
+  │                                                                 │
+  └─────────────────────────────────────────────────────────────────┘
+                    │
+                    ▼
+  ┌──────── AFTER AGENT ────────────────────────────────────────────┐
+  │                                                                  │
+  │  MemoryArchiveMiddleware.after_agent()                           │
+  │                                                                  │
+  │  1. 构建会话摘要 (_build_summary)                                │
+  │     ├─ 遍历 messages: HumanMessage / AIMessage / ToolMessage    │
+  │     ├─ 每条消息截取前 300 字符                                    │
+  │     └─ 合并为结构化摘要文本                                       │
+  │                                                                  │
+  │  2. L1 记忆进化 (extract_and_save)                               │
+  │     ├─ evolution.extract(conversation_summary)                   │
+  │     │   └─ 用 Mini Model 从摘要中提取:                           │
+  │     │       ├─ preferences → 追加到 USER.md                      │
+  │     │       └─ facts       → 追加到 MEMORY.md                    │
+  │     └─ log_daily → 写入 data/workspace/users/{uid}/memory/       │
+  │         {YYYY-MM-DD}.md                                          │
+  │                                                                  │
+  │  3. L2 中期记忆写入 (async only)                                 │
+  │     ├─ write_mid_term(conversation_summary, SESSION_SUMMARY)     │
+  │     │   └─ PostgreSQL → pgvector 嵌入 + ts_vector 索引          │
+  │     └─ write_mid_term(extracted_fact, FACT) × N                  │
+  │         └─ 每条事实独立存储，支持语义搜索                         │
+  │                                                                  │
+  │  4. L3 短期记忆清理                                              │
+  │     └─ short_term.clear_session(user_id, session_id)             │
+  │         └─ Redis TTL key 删除                                    │
+  │                                                                  │
+  │  5. 自主进化检测 (auto_evolve_enabled 时)                        │
+  │     └─ AutoEvolver.check_evolution_need(conversation_summary)   │
+  │         ├─ 识别 Skill 覆盖空白                                   │
+  │         └─ 有需求 → 提交后台任务 async 创建新 Skill              │
+  │                                                                  │
+  └──────────────────────────────────────────────────────────────────┘
+```
+
+#### 存储位置映射
+
+| 记忆层 | 物理位置 | 示例路径 |
+|--------|---------|----------|
+| L1 SOUL | 文件系统 | `data/workspace/users/{uid}/SOUL.md` |
+| L1 USER | 文件系统 | `data/workspace/users/{uid}/USER.md` |
+| L1 MEMORY | 文件系统 | `data/workspace/users/{uid}/MEMORY.md` |
+| L1 Daily Log | 文件系统 | `data/workspace/users/{uid}/memory/{date}.md` |
+| L2 PG | PostgreSQL | `mid_term_memory` 表 (pgvector) |
+| L3 Redis | Redis | `session:{user_id}:{session_id}` 键 |
+| Session JSONL | 文件系统 | `data/sessions/{uid}/{session_id}.jsonl` |
+
+#### 专家记忆隔离
+
+专家智能体和通用智能体使用不同的记忆空间：
+
+```
+通用智能体:
+  data/workspace/users/{user_id}/SOUL.md
+  data/workspace/users/{user_id}/USER.md
+
+专家智能体 (agent_id="equipment_monitor"):
+  data/workspace/users/{user_id}/agents/equipment_monitor/SOUL.md
+  data/workspace/users/{user_id}/agents/equipment_monitor/USER.md
+```
+
+隔离由 `UserContext.get_memory_path()` 控制：当 `agent_id` 非空时，记忆路径指向 `users/{user_id}/agents/{agent_id}/`。
+
 #### MemoryContext 结构
 
 ```python
 @dataclass
 class MemoryContext:
-    soul_content: str = ""           # 智能体人格
-    user_content: str = ""           # 用户偏好
-    memory_content: str = ""         # 关键事实
-    daily_log_content: str = ""      # 每日日志
-    mid_term_search_result: str = "" # 中期记忆搜索结果
+    soul_content: str = ""            # 智能体人格
+    user_content: str = ""            # 用户偏好
+    memory_content: str = ""          # 关键事实
+    daily_log_content: str = ""       # 每日日志（今+昨）
+    mid_term_results: list[str] = []  # PG 语义搜索结果
 
     def to_prompt_section(self) -> str:
-        # 编译为结构化提示块，注入到模型上下文
+        # 编译为结构化提示块:
+        # ## Agent Personality (SOUL.md) → 人格
+        # ## User Profile (USER.md)     → 偏好
+        # ## Key Facts (MEMORY.md)      → 事实
+        # ## Recent Context             → 日志
+        # ## Related History            → 搜索结果
 ```
 
-#### 记忆注入时机
+#### 各 Middleware 在记忆生命周期中的位置
 
-```
-MemoryInjectionMiddleware (before_model)
-  ├─ 加载 MemoryContext（SOUL + USER + MEMORY + daily_log）
-  ├─ 拼接 Skill Manifest
-  ├─ 如果有 mid_term 搜索 → 附加结果
-  └─ 注入到系统消息前
-```
+| 顺序 | Middleware | 触发时机 | 记忆操作 |
+|------|-----------|---------|----------|
+| 1 | `AuthInjectionMiddleware` | Before Agent | 初始化 UserContext，设置 session_id |
+| 2 | `MemoryInjectionMiddleware` | Before Model | 注入 L1 记忆 + Skill + Plugin；异步版附加 L2 搜索 |
+| 3 | `SummarizationMiddleware` | Before Model | 压缩历史消息，替换为摘要 |
+| 4 | `ContextEditingMiddleware` | Before Model | 删除低价值消息 |
+| 5 | `PreFlushMiddleware` | Before Model | 压缩前最后一次保存关键信息到 L1 |
+| 6 | `ToolFilterMiddleware` | Wrap Model | 按角色过滤工具（不影响记忆） |
+| 7 | `SecurityCheckMiddleware` | Wrap Tool | 审批链（不影响记忆） |
+| 8 | `SandboxMiddleware` | Wrap Tool | 文件/Shell/Python 沙箱隔离（不影响记忆） |
+| 9 | `OutputValidationMiddleware` | After Model | 输出校验（不影响记忆） |
+| 10 | `MemoryArchiveMiddleware` | After Agent | **L1 进化 + L2 写入 + L3 清理 + 自主进化检测** |
+
+#### 崩溃恢复
+
+会话 JSONL 文件采用**逐条追加写**策略，每产生一条消息立即 `flush` 到磁盘。即使 Agent 进程崩溃，已持久化的消息不会丢失，可用于：
+
+1. **会话重放** — `GET /api/sessions/{user_id}/{session_id}` 加载历史消息
+2. **恢复对话** — 前端重新连接时可恢复上一会话的完整上下文
+3. **审计追溯** — 每行 JSON 包含 timestamp + agent_id，支持按时间/智能体查询
 
 ---
 
@@ -361,7 +520,7 @@ security:
 # config/rbac.yaml
 rbac:
   roles:
-    admin:    {tools: [file_read,file_write,command_exec,web_search,...], approval_level: L3}
+    admin:    {tools: [file_read,file_write,command_exec,python_exec,web_search,...], approval_level: L3}
     manager:  {tools: [file_read,file_write,web_search,...],             approval_level: L3}
     operator: {tools: [file_read,web_search,query_database,...],         approval_level: L3}
     viewer:   {tools: [file_read,web_search,query_database,...],         approval_level: L2}
@@ -424,45 +583,441 @@ class ContextConfig:
 
 ### 3.5 Middleware — 中间件链
 
-**职责：** Agent 运行时的拦截器管道，在模型调用前后执行安全、记忆、过滤逻辑。
+**职责：** Agent 运行时的拦截器管道。LangChain v1 的 `AgentMiddleware` 提供 4 种钩子，覆盖 Agent 全生命周期的关键拦截点。10 层中间件按注册顺序依次执行，前一层可修改消息/工具/状态，后一层在修改后的数据上继续。
 
-#### 注册顺序（9 层）
+#### LangChain Middleware 钩子类型
 
-```python
-# runtime/agent.py — create_agent_for_user()
-agent = create_agent(
-    model=model,
-    tools=tools,
-    system_prompt=system_prompt,
-    middleware=[
-        AuthInjectionMiddleware(user_ctx),        # ① 注入用户上下文
-        MemoryInjectionMiddleware(...),            # ② 注入记忆+技能
-        compressor.create_summarization_middleware(), # ③ 总结压缩
-        compressor.create_context_editing_middleware(), # ④ 上下文编辑
-        PreFlushMiddleware(...),                   # ⑤ 冲刷检查
-        ToolFilterMiddleware(),                    # ⑥ 工具过滤
-        SecurityCheckMiddleware(approval_checker), # ⑦ 安全检查
-        SandboxMiddleware(sandbox_runner),         # ⑧ 沙箱执行
-        OutputValidationMiddleware(),              # ⑨ 输出校验
-        MemoryArchiveMiddleware(...),              # ⑩ 记忆归档
-    ],
-)
+| 钩子 | 触发时机 | 能力 |
+|------|---------|------|
+| `before_agent` | Agent 处理开始前（仅一次） | 初始化状态、注入 SystemMessage |
+| `before_model` | 每次 LLM 调用前 | 修改 messages、添加上下文 |
+| `wrap_model_call` | 包装 LLM 调用 | 修改 messages + tools、替换模型响应 |
+| `wrap_tool_call` | 每个工具调用执行前 | 修改/拦截工具调用、返回 ToolMessage |
+| `after_model` | 每次 LLM 返回后 | 修改 AI 响应消息 |
+| `after_agent` | Agent 处理完成时 | 清理、归档、触发副作用 |
+
+#### 执行时序全景
+
+```
+  用户消息进入
+       │
+       ▼
+  ╔══════════════════════════════════════════╗
+  ║   before_agent 阶段（仅一次）              ║
+  ╠══════════════════════════════════════════╣
+  ║ ① AuthInjectionMiddleware                ║
+  ║    验证 UserContext → 初始化 workspace    ║
+  ╚══════════════════════════════════════════╝
+       │
+       ▼
+  ┌─ LLM 调用循环 ──────────────────────────────────────┐
+  │                                                      │
+  │  ╔══════════════════════════════════════════════╗    │
+  │  ║  before_model 阶段（每次 LLM 调用）          ║    │
+  │  ╠══════════════════════════════════════════════╣    │
+  │  ║ ② MemoryInjectionMiddleware                 ║    │
+  │  ║    注入 L1 记忆 + Skill + Plugin + 冲刷警告 ║    │
+  │  ║    ★ 冲刷警告: token > flush_threshold×0.9 ║    │
+  │  ╚══════════════════════════════════════════════╝    │
+  │       │                                               │
+  │       ▼                                               │
+  │  ╔══════════════════════════════════════════════╗    │
+  │  ║  wrap_model_call 阶段（每次 LLM 调用）      ║    │
+  │  ╠══════════════════════════════════════════════╣    │
+  │  ║ ③ PreFlushMiddleware                        ║    │
+  │  ║    token > 60000 → 先保存关键信息到 L1      ║    │
+  │  ║ ④ SummarizationMiddleware                   ║    │
+  │  ║    token > 4000 → 压缩历史为摘要             ║    │
+  │  ║ ⑤ ContextEditingMiddleware                  ║    │
+  │  ║    大型工具输出 → 替换为文件引用             ║    │
+  │  ║ ⑥ ToolFilterMiddleware                     ║    │
+  │  ║    移除越权工具（静态+MCP）                  ║    │
+  │  ╚══════════════════════════════════════════════╝    │
+  │       │                                               │
+  │       ▼                                               │
+  │  ╔══════════╗  LLM API 调用  ╔══════════╗            │
+  │  ╚══════════╝                ╚══════════╝            │
+  │       │                                               │
+  │       ▼                                               │
+  │  ╔══════════════════════════════════════════════╗    │
+  │  ║  after_model 阶段（每次 LLM 返回后）        ║    │
+  │  ╠══════════════════════════════════════════════╣    │
+  │  ║ ⑨ OutputValidationMiddleware               ║    │
+  │  ║    检查 response_format → 校验输出结构       ║    │
+  │  ╚══════════════════════════════════════════════╝    │
+  │       │                                               │
+  │       ▼                                               │
+  │  ┌─ 模型决定调用工具？                                 │
+  │  │                                                    │
+  │  ├─ YES →                                             │
+  │  │  ╔════════════════════════════════════════════╗    │
+  │  │  ║  wrap_tool_call 阶段（每个工具调用）       ║    │
+  │  │  ╠════════════════════════════════════════════╣    │
+  │  │  ║ ⑦ SecurityCheckMiddleware                 ║    │
+  │  │  ║    L0-L4 五级审批链                        ║    │
+  │  │  ║ ⑧ SandboxMiddleware                       ║    │
+  │  │  ║    文件/Shell/Python → 沙箱隔离执行        ║    │
+  │  │  ╚════════════════════════════════════════════╝    │
+  │  │    → 工具结果返回给 LLM → 继续循环               │
+  │  │                                                    │
+  │  └─ NO → 退出循环                                     │
+  │                                                       │
+  └───────────────────────────────────────────────────────┘
+       │
+       ▼
+  ╔══════════════════════════════════════════════╗
+  ║  after_agent 阶段（仅一次）                   ║
+  ╠══════════════════════════════════════════════╣
+  ║ ⑩ MemoryArchiveMiddleware                   ║
+  ║    L1 记忆进化 + L2 PG 写入 + L3 清理         ║
+  ╚══════════════════════════════════════════════╝
 ```
 
-#### 各中间件详情
+---
 
-| 序号 | 中间件 | 类型 | 执行时机 | 核心逻辑 |
-|------|--------|------|----------|----------|
-| ① | AuthInjection | before_agent | Agent 处理前 | 验证 UserContext 存在，初始化用户工作空间 |
-| ② | MemoryInjection | before_model | 每次 LLM 调用前 | 注入 SOUL/USER/MEMORY + Skill 清单到提示 |
-| ③ | Summarization | wrap_model_call | 每次 LLM 调用前 | Token 超阈值 → 压缩历史 |
-| ④ | ContextEditing | wrap_model_call | 每次 LLM 调用前 | 大型文件内容 → 引用占位符 |
-| ⑤ | PreFlush | before_model | 每次 LLM 调用前 | 上下文接近上限 → 注入保存指令 |
-| ⑥ | ToolFilter | wrap_model_call | 每次 LLM 调用前 | 根据 RBAC 移除越权工具 |
-| ⑦ | SecurityCheck | wrap_tool_call | 危险工具调用时 | L0→L4 审批链 |
-| ⑧ | Sandbox | wrap_tool_call | command_exec 调用时 | Docker 容器隔离执行 |
-| ⑨ | OutputValidation | after_model | LLM 返回后 | 输出格式校验 |
-| ⑩ | MemoryArchive | after_agent | Agent 处理完成后 | 会话摘要归档，触发进化检查 |
+#### ① AuthInjectionMiddleware
+
+**钩子**: `before_agent` | **文件**: `harness/middleware/auth_injection.py`
+
+```
+触发: Agent 处理开始（仅一次，在所有 LLM 调用之前）
+```
+
+**处理逻辑**：
+1. 检查 `runtime.context` 是否存在（LangGraph Runtime 注入机制将 `UserContext` 挂载到 runtime）
+2. 若 runtime 不可用，回退使用构造时保存的 `user_ctx`
+3. 获取 `user_id`，调用 `MemoryManager.init_user(user_id)` 初始化工作空间目录
+4. 工作空间初始化仅在首次运行时生效（文件不存在时创建默认 SOUL.md/USER.md）
+
+**为什么是 before_agent**: 必须在最开始确保工作空间存在，后续中间件（MemoryInjection、MemoryArchive）都依赖文件系统就绪。
+
+---
+
+#### ② MemoryInjectionMiddleware
+
+**钩子**: `before_model`（同步 + 异步两个版本） | **文件**: `harness/middleware/memory_injection.py`
+
+```
+触发: 每次 LLM 调用前
+去重: _injected_sessions 集合确保每个会话只注入一次完整记忆
+```
+
+**同步版 `before_model` 处理逻辑**：
+1. 检查 `session_id` 是否已在 `_injected_sessions` 中
+2. 若未注入 → 加载完整记忆上下文：
+   - `memory_manager.load_context(user_id)` → 读取 L1 文件（SOUL/USER/MEMORY/daily_log）
+   - `skill_manager.generate_manifest(user_role)` → 按角色 `skill_access` 过滤 Skill 清单
+   - `plugin_manager.generate_plugin_manifest()` → 仅当插件数 > 3 时注入 PLUGIN 摘要
+3. 组装为结构化 SystemMessage：
+   ```
+   --- MEMORY CONTEXT ---
+   ## Agent Personality (SOUL.md)
+   ## User Profile (USER.md)
+   ## Key Facts (MEMORY.md)
+   ## Recent Context (daily log)
+   --- END MEMORY ---
+   --- AVAILABLE PLUGINS --- (可选)
+   --- AVAILABLE SKILLS ---
+   ```
+4. 将 `session_id` 加入 `_injected_sessions` 去重
+5. **冲刷警告检查**: `count_tokens_approximately(messages) >= flush_threshold × 0.9`
+   - 若触发 → 追加 FLUSH WARNING SystemMessage（提示 Agent 用 memory_manage 保存关键信息）
+
+**异步版 `abefore_model` 额外处理**：
+- 在加载 L1 记忆后，附加 L2 中期记忆检索：
+  - 提取最后一条 `HumanMessage` 作为搜索 query
+  - `memory_manager.search_mid_term(user_id, query, top_k)` → pgvector 语义搜索
+  - 搜索结果附加到 `MemoryContext.mid_term_results`
+- PG 不可用时优雅降级（返回空列表）
+
+**注入内容大小控制**：
+- Skill manifest ~200 tokens
+- Plugin manifest ~100 tokens（仅 >3 插件时）
+- Memory context ~500-2000 tokens（取决于 L1 文件大小）
+- 总计注入 ≈ 800-2300 tokens
+
+---
+
+#### ④ SummarizationMiddleware
+
+**钩子**: `wrap_model_call`（LangChain 内置） | **构造**: `ContextCompressor.create_summarization_middleware()`
+
+```
+触发: 每次 LLM 调用前
+条件: count_tokens_approximately(messages) >= compression_threshold (默认 4000)
+```
+
+**处理逻辑**：
+1. 统计当前 messages 的近似 token 数
+2. 若 `tokens >= compression_threshold (4000)`:
+   - 调用 Mini Model（轻量模型）对历史对话生成摘要
+   - 保留最近 `keep_recent_messages`（默认 20）条消息
+   - 替换旧消息为摘要 SystemMessage
+3. 若未达阈值 → 跳过，消息不变
+
+**关键参数**:
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `compression_threshold` | 4000 | 触发压缩的 token 阈值 |
+| `keep_recent_messages` | 20 | 压缩时保留的最近消息数 |
+
+**为什么用 Mini Model**: 压缩本身消耗 token，用轻量模型降低成本。Primary Model 用于核心推理，Mini Model 处理压缩、审批、记忆提取等辅助任务。
+
+---
+
+#### ⑤ ContextEditingMiddleware
+
+**钩子**: `wrap_model_call`（LangChain 内置） | **构造**: `ContextCompressor.create_context_editing_middleware()`
+
+```
+触发: 每次 LLM 调用前
+策略: FileReferenceEdit — 大工具输出替换为文件引用
+```
+
+**处理逻辑**：
+1. 遍历 messages 中的 `ToolMessage`
+2. 若工具输出的字符数 > `placeholder_threshold`（默认 2000）:
+   - 将完整输出写入临时文件
+   - 替换 ToolMessage 内容为: `[大型输出已保存至 {file_path}，仅显示最近 3 个完整结果]`
+   - 保留最近 `keep=3` 个完整 ToolMessage，其余替换为引用
+3. 若未达阈值 → 保持不变
+
+**为什么放在 Summarization 之后**: PreFlush 先保存关键信息到 L1，Summarization 压缩整体历史减小 token 消耗，ContextEditing 最后替换大输出为引用（进一步减小单条消息体积）。三者互补。
+
+---
+
+#### ③ PreFlushMiddleware
+
+**钩子**: `wrap_model_call` | **文件**: `harness/context/flush.py`
+
+```
+触发条件: tokens >= flush_threshold (60000)
+去重: Redis 持久化标记 + 内存 set，每会话最多冲刷一次 (max_flush_per_session=1)
+★ 必须在 SummarizationMiddleware 之前注册，确保先保存再压缩
+```
+
+**冲刷警告**（在 MemoryInjectionMiddleware.before_model 中提前注入）：
+- `tokens >= flush_threshold × 0.9 (54000)` → 注入 SystemMessage: "上下文即将压缩，请用 memory_manage 保存关键信息"
+- 该警告在 `before_model` 阶段运行，早于所有 `wrap_model_call`，确保模型提前感知
+
+**wrap_model_call 处理逻辑**（PreFlushMiddleware 自身）：
+1. 检查 `session_id` 是否已触发过冲刷（内存 set + Redis 双重去重）
+2. 统计 `request.messages` token 数
+3. 若 `tokens >= flush_threshold (60000)`:
+   - 注入 `_FLUSH_PROMPT` 作为 HumanMessage: "在压缩前，用 memory_manage 工具保存关键事实/决策/偏好到 USER.md 和 MEMORY.md，保存后回复 SAVED"
+   - 调用 `handler(flush_request)` → LLM 响应并可能调用 memory_manage 工具
+   - LangGraph 自动将工具调用和结果加入 state
+4. 标记 `_flush_triggered_sessions.add(session_id)` + Redis `set_flush_triggered()`
+5. **返回空 AIMessage** (`name="NO_REPLY"`) — 冲刷轮次的回复对用户不可见
+6. SummarizationMiddleware 随后压缩时，冲刷轮次的 AI 消息和工具消息已被包含在历史中
+
+**为什么冲刷轮次对用户不可见**: 冲刷是系统内部操作，用户不应看到 "SAVED" 回复。但冲刷轮次的消息会被 SummarizationMiddleware 看到——所以压缩后的摘要包含了 Agent 保存的关键信息。
+
+---
+
+#### ⑥ ToolFilterMiddleware
+
+**钩子**: `wrap_model_call` | **文件**: `harness/middleware/tool_filter.py`
+
+```
+触发: 每次 LLM 调用前
+作用: 从 LLM 可见工具列表中移除越权工具
+```
+
+**处理逻辑**：
+1. 加载 RBAC 配置:
+   - `get_role_tool_access()` → 静态工具 (file_read, command_exec 等) 的角色映射
+   - `get_role_mcp_tool_access()` → MCP 工具 (server:tool) 的角色映射
+2. 获取当前用户角色: `request.runtime.context.role`（无上下文时回退 viewer）
+3. 检查 `user_ctx.permissions` — 若有显式权限列表则直接使用（动态覆盖）
+4. 遍历 `request.tools`:
+   - **MCP 工具**（名称以 `mcp__` 开头）: 解析为 `server:tool` 格式，与 `allowed_mcp` 列表匹配
+     - 支持通配符: `"*"`（全部）、`"server:*"`（某服务器全部工具）
+   - **静态工具**: `t.name in allowed_tools`
+5. 保留通过过滤的工具，调用 `request.override(tools=filtered_tools)` 替换工具列表
+6. 调用 `handler(updated)` — 模型只能看到过滤后的工具
+
+**双层防护**:
+- Layer 1 (Agent 创建时): `runtime/agent.py` 选择工具集 (BASE/ALL/CAPTAIN)
+- Layer 2 (每次 LLM 调用): `ToolFilterMiddleware` 运行时过滤 — 即使 Agent 创建时带了全部工具，运行时也会按角色过滤
+
+---
+
+#### ⑦ SecurityCheckMiddleware
+
+**钩子**: `wrap_tool_call` | **文件**: `harness/middleware/security_check.py`
+
+```
+触发: 每个工具调用执行前
+范围: 仅检查 command_exec / python_exec / file_write / query_database（危险工具）
+其他工具直接放行
+```
+
+**处理逻辑**：
+1. 获取 `tool_name` 和 `tool_args`
+2. 若工具名不在 `["command_exec", "python_exec", "file_write", "query_database"]` → 直接放行
+3. 提取要检查的内容:
+   - `command_exec` → `args.command`
+   - `python_exec` → `args.code`
+   - `file_write` → `args.path`
+   - `query_database` → `args.sql`
+4. 若无内容 → 直接放行
+5. 调用 `approval_checker.check(content, tool_name, user_ctx)` → L0-L4 审批链
+
+**审批结果处理**:
+- **approved=True** → `handler(request)` 执行工具
+- **approved=False, level=L4** → 返回 ToolMessage: "需要人工审批，请通知用户……"
+- **approved=False, level<L4** → 返回 ToolMessage: "已被安全策略阻止，请修改方案重试"
+
+**五级审批链** (由 `ApprovalChecker` 执行):
+| 级别 | 机制 | 匹配 → 行为 | 未匹配 → 行为 |
+|------|------|-------------|---------------|
+| L0 | 黑名单字符串 (12 个关键词) | 直接阻断 | 进入 L1 |
+| L1 | 正则模式 (8 个危险模式) | 直接阻断 | 进入 L2 |
+| L2 | 白名单分类（安全命令、只读 SQL、安全文件路径） | command_exec 白名单放行；query_database 仅 SELECT；python_exec 继续升级 | viewer → 阻断; 其他 → 进入 L3 |
+| L3 | Mini Model 安全审查 | SAFE→放行; UNSAFE→阻断 | UNCERTAIN→进入 L4 |
+| L4 | 人工审批 | 阻断等待，生成 approval_id | — |
+
+---
+
+#### ⑧ SandboxMiddleware
+
+**钩子**: `wrap_tool_call` | **文件**: `harness/middleware/sandbox.py`
+
+```
+触发: 每个工具调用执行前（仅在 SecurityCheckMiddleware 放行后执行）
+范围: file_read / file_write / command_exec / python_exec 进入沙箱
+```
+
+**处理逻辑**：
+1. 若工具名不在 `{"file_read","file_write","command_exec","python_exec"}` → 直接放行；`memory_manage` 仍属于平台记忆工具，不进入沙箱。
+2. 若未注入 `SandboxManager` 或 `sandbox_enabled=false` → 走原始 handler，仅用于本地调试/兼容。
+3. 解析 `UserContext`，用 `user_id + session_id + agent_id` 获取或复用沙箱会话。
+4. 按工具映射到统一后端接口:
+   - `file_read` → `SandboxManager.read_file()`
+   - `file_write` → `SandboxManager.write_file()`
+   - `command_exec` → `SandboxManager.run_shell()`
+   - `python_exec` → `SandboxManager.run_python()`
+5. 沙箱错误返回 ToolMessage；`fail_closed=true` 时后端不可用直接阻断，不回退宿主机。
+6. 文件读写返回原始内容/写入结果；Shell/Python 输出带 `[sandbox:{backend}]` 前缀。
+
+**为什么放在 SecurityCheck 之后**: 审批链先过滤危险操作，沙箱再隔离执行。即使审批通过，沙箱仍提供文件系统、进程和网络层面的纵深防御。
+
+---
+
+#### ⑨ OutputValidationMiddleware
+
+**钩子**: `after_model` | **文件**: `harness/middleware/output_validation.py`
+
+```
+触发: 每次 LLM 返回后（仅当 state 中有 response_format 时）
+重试: 最多 MAX_RETRIES=3 次
+```
+
+**处理逻辑**：
+
+1. 检查 `state` 中是否有 `response_format` 字段 → 无则跳过（普通对话）
+2. 获取最后一条 `AIMessage`（跳过之前的校验反馈消息）
+3. **执行校验** — 三种策略按优先级尝试：
+
+   | 策略 | 条件 | 校验方式 |
+   |------|------|----------|
+   | Pydantic | `response_format` 是 BaseModel 子类 | `json.loads()` → `model_validate()` |
+   | JSON Schema | `response_format` 是 dict | JSON 解析 → 逐字段类型检查 → required 检查 |
+   | Basic JSON | 以上都不满足 | 仅 `json.loads()` 检查合法性 |
+
+4. **校验通过** → 重置重试计数器为 0，正常返回
+5. **校验失败**:
+   - 检查重试计数 `state[_RETRY_COUNT_KEY]` ≥ `MAX_RETRIES`(3)?
+     - 是 → 放弃重试，接受当前输出（记录 warning 日志）
+     - 否 → 构造 `ToolMessage` 注入错误反馈:
+       ```
+       Your previous response failed output validation.
+       Please correct it and try again.
+
+       Validation errors:
+       - Missing required field: 'summary'
+       - Field 'count': expected integer, got string
+
+       Expected format: JSON object with fields:
+         summary: str
+         count: int
+       ```
+   - 模型收到 ToolMessage → 视为工具调用结果 → 自动重试修正
+
+**重试流程**：
+
+```
+LLM 返回
+  → ⑨ after_model
+    → 有 response_format? ──NO──→ 跳过
+    → 提取最后 AIMessage
+    → validate(content, response_format)
+      ├─ 通过 → 返回 {_retry_count: 0}
+      └─ 失败 → retry_count < 3?
+          ├─ YES → 注入 ToolMessage(校验错误详情)
+          │          → LLM 看到错误 → 重新生成
+          │          → 再次进入 ⑨ after_model
+          └─ NO  → 放弃，记录 warning："output_validation_max_retries"
+```
+
+**为什么用 ToolMessage 而非 SystemMessage**: ToolMessage 会触发 LangGraph 的工具结果处理流程，模型将其视为"工具调用失败需要修正"，而非新增系统指令。这更符合 LangChain 的消息语义。
+
+---
+
+#### ⑩ MemoryArchiveMiddleware
+
+**钩子**: `after_agent`（同步 + 异步两个版本） | **文件**: `harness/middleware/memory_archive.py`
+
+```
+触发: Agent 处理完成（在所有 LLM 调用结束后，仅一次）
+```
+
+**同步版 `after_agent` 处理逻辑**：
+1. 构建会话摘要 `_build_summary(messages)`:
+   - 遍历 messages 中每条 HumanMessage/AIMessage/ToolMessage
+   - Human → `"User: {前300字符}"`
+   - AI → `"Assistant: {前300字符}"` + 工具调用列表
+   - Tool → `"Tool result ({name}): {前80字符}"`
+2. L1 记忆进化: `memory_manager.extract_and_save(user_id, summary)`
+   - Mini Model 从摘要中提取 `preferences` 和 `facts`
+   - preferences → 追加到 `USER.md`
+   - facts → 追加到 `MEMORY.md`
+   - summary → 追加到 `{date}.md` (daily log)
+3. 同步版不写 PG（必须异步）
+
+**异步版 `aafter_agent` 额外处理**:
+4. L2 中期记忆写入:
+   - `write_mid_term(conversation_summary, SESSION_SUMMARY)` → PG
+   - `write_mid_term(extracted_fact, FACT)` × N → PG
+5. L3 短期记忆清理: `short_term.clear_session(user_id, session_id)` → Redis TTL 删除
+6. 自主进化检测（`auto_evolve_enabled=True` 时）:
+   - `AutoEvolver.check_evolution_need(conversation_summary)`
+   - 识别 Skill 覆盖空白 → 提交后台任务自动创建 Skill
+
+---
+
+#### 中间件注册顺序的设计原则
+
+```
+① AuthInjection      ← 必须先确保 workspace 存在
+② MemoryInjection    ← 依赖 workspace 中有文件可读
+③ PreFlush           ← 必须在压缩前保存（token 超限时先存再压）
+④ Summarization      ← 在 PreFlush 之后压缩历史
+⑤ ContextEditing     ← 替换大输出为引用（与压缩互补）
+⑥ ToolFilter         ← 模型看到之前过滤工具
+⑦ SecurityCheck      ← 工具执行前审批
+⑧ Sandbox            ← 审批通过后隔离执行
+⑨ OutputValidation   ← 模型返回后校验
+⑩ MemoryArchive      ← 最后归档所有结果
+```
+
+关键约束：
+- **③ 必须在 ④ 之前**: PreFlush 的冲刷保存必须在 Summarization 压缩之前执行。否则 token 超限时压缩先发生，关键信息来不及保存到 L1 记忆。
+- **② 注入的冲刷警告在 ③ 之前**: MemoryInjectionMiddleware 的 `before_model` 钩子在所有 `wrap_model_call` 之前运行，所以 token 接近阈值时警告正确注入。
+- **⑥ 必须在模型调用之前**: 工具过滤必须发生在 LLM 看到工具列表时
+- **⑦→⑧ 顺序固定**: 审批通过才进沙箱
+- **⑩ 必须在最后**: 归档必须等所有 LLM 调用全部完成
 
 ---
 
@@ -673,39 +1228,51 @@ Captain Agent (admin/manager + team_enabled)
 
 ### 3.10 Sandbox — 沙箱执行
 
-**职责：** 隔离执行不信任的命令，防止影响宿主机。
+**职责：** 为 Agent 的任务工作区提供隔离运行时，覆盖文件读写、Shell 命令和 Python 执行，防止不信任操作影响宿主机或其他会话。
 
 #### 关键文件
 
 | 文件 | 作用 |
 |------|------|
-| `harness/sandbox/runner.py` | `SandboxRunner` — Docker 容器生命周期 |
-| `harness/sandbox/image.py` | `SandboxImageManager` — 镜像构建/缓存 |
+| `harness/sandbox/manager.py` | `SandboxManager` — 会话生命周期、路径约束、后端选择、审计 |
+| `harness/sandbox/backends.py` | `SandboxBackend` 接口 + AgentScope Remote / Local Docker / Disabled 后端 |
+| `harness/sandbox/types.py` | `SandboxResult`、`SandboxError`、`SandboxPathError` |
+| `harness/sandbox/image.py` | `SandboxImageManager` — local_docker 后端镜像构建/缓存 |
+| `harness/sandbox/runner.py` | 旧版 Docker `SandboxRunner`，保留兼容测试，不再是生产主路径 |
 
 #### 执行流程
 
 ```
-SandboxMiddleware.wrap_tool_call("command_exec", args)
+SandboxMiddleware.wrap_tool_call(tool_name, args)
   │
-  ├─ sandbox_enabled? → YES
-  │  └─ SandboxRunner.execute(command, timeout=30, max_memory="256m")
-  │     ├─ docker run --rm --network=none --memory=256m ...
-  │     ├─ 捕获 stdout/stderr (max 10KB)
-  │     └─ 返回结果 → ToolMessage
+  ├─ tool_name in {file_read,file_write,command_exec,python_exec}? → YES
+  │  └─ SandboxManager._ensure_session(user_id, session_id, agent_id)
+  │     ├─ healthcheck: 后端不可用且 fail_closed=true → 阻断
+  │     ├─ 路径归一化: 禁止绝对路径、.. 逃逸、Windows 盘符
+  │     ├─ backend=agentscope_remote → AgentScope Runtime Sandbox Service
+  │     └─ backend=local_docker → 会话级长生命周期 Docker 容器
   │
-  └─ sandbox_enabled? → NO
-     └─ 回退到 subprocess 本地执行
+  └─ 其他工具 → 原始 handler
 ```
+
+#### 后端设计
+
+| 后端 | 用途 | 特点 |
+|------|------|------|
+| `agentscope_remote` | 生产默认 | 通过 AgentScope Runtime Sandbox Service 复用远程会话，映射 Shell/Python/Filesystem 能力 |
+| `local_docker` | 开发/私有离线 | 每个沙箱会话一个长期容器，默认禁网、限内存、支持 TTL 清理 |
+| `disabled` | 本地调试 | 禁用沙箱；生产环境不应使用 |
 
 #### 安全约束
 
-| 限制项 | 值 |
-|--------|-----|
-| 执行超时 | 30 秒 |
-| 内存限制 | 256 MB |
-| 网络隔离 | `network=none` |
-| 输出截断 | 10 KB |
-| 容器清理 | 执行后强制 remove |
+| 限制项 | 策略 |
+|--------|------|
+| 会话隔离 | `user_id + session_id + agent_id` 组成沙箱会话键 |
+| 工作区 | 所有文件操作限定在 sandbox workspace |
+| 路径约束 | 禁止绝对路径、`..`、Windows 盘符；local_docker 额外用 `realpath` 防软链接越界 |
+| 网络策略 | 默认 `sandbox_network_default=deny` |
+| Fail closed | 后端不可用时危险工具直接失败，不回退宿主机 |
+| 审计 | 记录用户、会话、智能体、工具、摘要、后端、耗时、退出码，敏感字段脱敏 |
 
 ---
 
@@ -900,7 +1467,7 @@ WebSocket / REST 收到 chat 请求 (agent_id)
 | 文件 | 作用 |
 |------|------|
 | `runtime/agent.py` | `create_agent_for_user()` — 通用智能体工厂 |
-| `runtime/tools.py` | 11 个工具定义 + 4 个工具集 |
+| `runtime/tools.py` | 基础工具 + 子任务/后台/团队工具集 |
 | `runtime/models.py` | 模型创建：primary / fallback / mini |
 | `runtime/config.py` | `AgentConfig` — pydantic-settings 配置 |
 | `runtime/context_schema.py` | `UserContext` + `UserRole` |
@@ -908,15 +1475,14 @@ WebSocket / REST 收到 chat 请求 (agent_id)
 ### 工具集分级
 
 ```python
-BASE_TOOLS = [file_read, file_write, command_exec, web_search, query_database,
-              send_notification, memory_manage]                               # 7 个
+BASE_TOOLS = [file_read, file_write, command_exec, python_exec, web_search,
+              query_database, send_notification, memory_manage]                # 8 个
 
-ALL_TOOLS = BASE_TOOLS + [spawn_subagent]                                    # 8 个
+ALL_TOOLS = BASE_TOOLS + [spawn_subagent, submit_background_task]
 
-CAPTAIN_TOOLS = ALL_TOOLS + [delegate_task, read_task_board, collect_results] # 11 个
+CAPTAIN_TOOLS = ALL_TOOLS + [delegate_task, read_task_board, collect_results]
 
-MEMBER_TOOLS = [file_read, file_write, command_exec, web_search, query_database,
-                send_notification, memory_manage, read_task_board]            # 8 个
+MEMBER_TOOLS = BASE_TOOLS + [read_task_board]
 ```
 
 ### 角色→工具集映射
@@ -924,11 +1490,11 @@ MEMBER_TOOLS = [file_read, file_write, command_exec, web_search, query_database,
 ```python
 # 工具集选择
 if user_ctx.role in CAPTAIN_CAPABLE_ROLES and config.team_enabled:
-    tools = list(CAPTAIN_TOOLS)       # admin/manager + team → 11 个
+    tools = list(CAPTAIN_TOOLS)       # admin/manager + team
 elif user_ctx.role in SUBAGENT_CAPABLE_ROLES:
-    tools = list(ALL_TOOLS)           # admin/manager → 8 个
+    tools = list(ALL_TOOLS)           # admin/manager
 else:
-    tools = list(BASE_TOOLS)          # operator/viewer → 7 个
+    tools = list(BASE_TOOLS)          # operator/viewer 初始工具集，随后由 ToolFilterMiddleware 按 RBAC 过滤
 
 # 附加角色允许的 MCP 工具
 if mcp_manager:
@@ -994,7 +1560,7 @@ model = init_chat_model("deepseek:deepseek-chat")
 | 会话持久化 | JSONL 文件 | `data/workspace/sessions/` | 崩溃安全消息日志 |
 | 用户存储 | JSON 文件 | `data/users.json` | bcrypt 密码用户库 |
 | 日志 | RotatingFile | `data/logs/api.log + gateway.log` | API 日志 + 系统运行日志 |
-| Docker | Docker Engine | `sandbox_*` | 命令执行隔离 |
+| 沙箱运行时 | AgentScope Runtime Sandbox / Docker Engine | `sandbox_*` | 文件、Shell、Python 隔离执行 |
 | 调度器 | APScheduler | `heartbeat_interval` | 心跳 + 定时任务 |
 
 ### 配置加载顺序
@@ -1024,7 +1590,7 @@ model = init_chat_model("deepseek:deepseek-chat")
 └──────────────────────┬──────────────────────────────────────┘
                        │ create_expert_agent() / create_agent_for_user()
 ┌──────────────────────┴──────────────────────────────────────┐
-│ L3 HARNESS          9-layer Middleware Chain                 │
+│ L3 HARNESS          Middleware Chain                         │
 │                     AuthInjection → MemoryInjection          │
 │                     → Summarization → ContextEditing          │
 │                     → PreFlush → ToolFilter                  │
@@ -1035,7 +1601,7 @@ model = init_chat_model("deepseek:deepseek-chat")
 ┌──────────────────────┴──────────────────────────────────────┐
 │ L4 AGENT RUNTIME   create_agent(model, tools, middleware)    │
 │                    Tools: file_read/write, command_exec,     │
-│                           web_search, query_database, ...    │
+│                           python_exec, web_search, ...       │
 └──────────────────────┬──────────────────────────────────────┘
                        │ init_chat_model()
 ┌──────────────────────┴──────────────────────────────────────┐
@@ -1044,7 +1610,7 @@ model = init_chat_model("deepseek:deepseek-chat")
 └──────────────────────┬──────────────────────────────────────┘
                        │
 ┌──────────────────────┴──────────────────────────────────────┐
-│ L6 INFRASTRUCTURE  PostgreSQL+pgvector / Redis / Docker     │
+│ L6 INFRASTRUCTURE  PostgreSQL+pgvector / Redis / Sandbox    │
 │                    data/workspace/  data/users.json          │
 │                    data/logs/ (api.log + gateway.log)        │
 └─────────────────────────────────────────────────────────────┘

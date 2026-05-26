@@ -1,5 +1,7 @@
 """after_agent middleware — archives session to memory and triggers L1 evolution."""
 
+import asyncio
+import structlog
 from typing import Any
 
 from langchain.agents.middleware import AgentMiddleware, AgentState
@@ -10,6 +12,8 @@ from harness.memory.manager import MemoryManager
 from harness.memory.types import MidTermSummaryType
 from runtime.context_schema import UserContext
 from runtime.config import AgentConfig
+
+logger = structlog.get_logger()
 
 
 class MemoryArchiveMiddleware(AgentMiddleware):
@@ -39,84 +43,92 @@ class MemoryArchiveMiddleware(AgentMiddleware):
                 summary_parts.append(f"Tool result ({name}): {content_preview}")
         return "\n".join(summary_parts) if summary_parts else "(empty conversation)"
 
+    # ── Sync path (REST API) ──
+
     def after_agent(self, state: AgentState, runtime: Runtime) -> dict[str, Any] | None:
-        """Archive conversation to memory after agent run completes (sync)."""
+        """Archive conversation after agent run completes.
+
+        Per-session operations (no LLM calls):
+        - Write session summary to PG (L2)
+        - Append daily log (L1)
+        - Clear Redis session (L3)
+
+        LLM-based memory extraction and evolution are deferred to
+        MemoryHeartbeatTask (periodic batch processing).
+        """
         if runtime is None or runtime.context is None:
             return None
 
         user_ctx: UserContext = runtime.context
         messages = state.get("messages", [])
-
         conversation_summary = self._build_summary(messages)
 
-        # L1 memory evolution: extract preferences/facts via LLM
-        self.memory_manager.extract_and_save(user_ctx.user_id, conversation_summary)
+        self.memory_manager.log_daily(user_ctx.user_id, conversation_summary)
+        self._run_async_archive(user_ctx.user_id, user_ctx.session_id, conversation_summary)
 
-        # PG write not available in sync context — async version handles it
         return None
+
+    # ── Async path (WebSocket) ──
 
     async def aafter_agent(self, state: AgentState, runtime: Runtime) -> dict[str, Any] | None:
-        """Archive conversation to memory after agent run completes (async)."""
+        """Archive conversation after agent run completes (async)."""
         if runtime is None or runtime.context is None:
             return None
 
         user_ctx: UserContext = runtime.context
         messages = state.get("messages", [])
-
         conversation_summary = self._build_summary(messages)
 
-        # L1 memory evolution: extract preferences/facts via LLM
-        self.memory_manager.extract_and_save(user_ctx.user_id, conversation_summary)
-
-        # Write session summary to PG (mid-term memory)
-        await self.memory_manager.write_mid_term(
-            user_ctx.user_id,
-            content=conversation_summary,
-            summary_type=MidTermSummaryType.SESSION_SUMMARY,
-            metadata={"session_id": user_ctx.session_id},
-        )
-
-        # Write extracted facts to PG as well
-        if self.memory_manager.evolution:
-            result = self.memory_manager.evolution.extract(conversation_summary)
-            for fact in result.get("facts", []):
-                await self.memory_manager.write_mid_term(
-                    user_ctx.user_id,
-                    content=fact,
-                    summary_type=MidTermSummaryType.FACT,
-                    metadata={"source": "session_summary"},
-                )
-
-        # Clear short-term session data
-        await self.memory_manager.short_term.clear_session(user_ctx.user_id, user_ctx.session_id)
-
-        # Phase 3: Auto-evolution check (if enabled)
-        if self.config and getattr(self.config, "auto_evolve_enabled", False):
-            try:
-                from harness.evolution.auto_evolve import AutoEvolver
-                from harness.multi_agent.subagent import SubAgentRunner
-                from harness.skill.manager import SkillManager
-                from harness.security.approval import ApprovalChecker
-                from harness.evolution.three_agent import ThreeAgentVerifier
-
-                subagent_runner = SubAgentRunner(self.config, memory_manager, SkillManager(self.config), ApprovalChecker())
-                verifier = ThreeAgentVerifier(subagent_runner, max_rounds=self.config.three_agent_max_rounds)
-                evolver = AutoEvolver(subagent_runner, verifier, SkillManager(self.config), self.config)
-
-                check_result = evolver.check_evolution_need(conversation_summary, user_ctx.user_id)
-                if check_result.needs_evolution:
-                    logger.info("auto_evolution_triggered", user_id=user_ctx.user_id, skill_name=check_result.suggested_skill_name)
-                    # Submit to background task manager for async execution (non-blocking)
-                    try:
-                        from gateway.server import background_manager
-                        await background_manager.submit(
-                            name=f"auto_evolve_{check_result.suggested_skill_name}",
-                            prompt=f"Create a new Skill: {check_result.suggested_skill_name}. Requirement: {check_result.reason}",
-                            user_id=user_ctx.user_id,
-                        )
-                    except Exception:
-                        logger.warning("auto_evolve_background_submit_failed", error="background_manager not available")
-            except Exception as e:
-                logger.warning("auto_evolution_check_failed", error=str(e))
+        self.memory_manager.log_daily(user_ctx.user_id, conversation_summary)
+        await self._archive_mid_and_short(user_ctx.user_id, user_ctx.session_id, conversation_summary)
 
         return None
+
+    # ── Internal ──
+
+    def _run_async_archive(self, user_id: str, session_id: str, summary: str) -> None:
+        """Run L2/L3 archive tasks in a dedicated event loop (sync path)."""
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # Event loop already running — schedule and hope for the best
+                import concurrent.futures
+                future = concurrent.futures.Future()
+
+                async def _run():
+                    try:
+                        await self._archive_mid_and_short(user_id, session_id, summary)
+                        future.set_result(None)
+                    except Exception as e:
+                        future.set_exception(e)
+
+                loop.call_soon_threadsafe(asyncio.ensure_future, _run())
+                future.result(timeout=30)
+                return
+            loop.run_until_complete(self._archive_mid_and_short(user_id, session_id, summary))
+        except RuntimeError:
+            try:
+                loop = asyncio.new_event_loop()
+                loop.run_until_complete(self._archive_mid_and_short(user_id, session_id, summary))
+                loop.close()
+            except Exception as e:
+                logger.warning("memory_archive_sync_l2_failed", error=str(e))
+        except Exception as e:
+            logger.warning("memory_archive_sync_event_loop_error", error=str(e))
+
+    async def _archive_mid_and_short(self, user_id: str, session_id: str, summary: str) -> None:
+        """Write L2 (PG) and clear L3 (Redis).
+
+        Only writes session_summary — LLM-based fact extraction is deferred
+        to MemoryHeartbeatTask for batch processing.
+        """
+        # L2: PG session summary (cheap INSERT, no LLM)
+        await self.memory_manager.write_mid_term(
+            user_id,
+            content=summary,
+            summary_type=MidTermSummaryType.SESSION_SUMMARY,
+            metadata={"session_id": session_id},
+        )
+
+        # L3: clear Redis session
+        await self.memory_manager.short_term.clear_session(user_id, session_id)

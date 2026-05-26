@@ -10,7 +10,8 @@ def test_admin_has_all_tools():
     assert "file_read" in admin_tools
     assert "file_write" in admin_tools
     assert "command_exec" in admin_tools
-    assert len(admin_tools) == 7
+    assert "python_exec" in admin_tools
+    assert len(admin_tools) == 8
 
 
 def test_viewer_has_readonly_tools():

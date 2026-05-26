@@ -34,15 +34,21 @@ class MemoryInjectionMiddleware(AgentMiddleware):
         skill_manager: SkillManager,
         context_config: ContextConfig | None = None,
         agent_config: AgentConfig = None,
+        allowed_skills: list[str] | None = None,
     ):
         self.memory_manager = memory_manager
         self.skill_manager = skill_manager
         self.context_config = context_config or ContextConfig()
         self.agent_config = agent_config
+        self.allowed_skills = allowed_skills  # None=全部, []=无, ["name"]=精确过滤
         self._injected_sessions: set[str] = set()
 
     def before_model(self, state: AgentState, runtime: Runtime) -> dict[str, Any] | None:
-        """Add memory context and skill manifest (sync version — no mid-term retrieval)."""
+        """Add memory context and skill manifest.
+
+        Sync version — attempts mid-term retrieval via a dedicated event loop.
+        Falls back to L1-only context if no event loop or PG unavailable.
+        """
         if runtime is None or runtime.context is None:
             return None
 
@@ -53,13 +59,17 @@ class MemoryInjectionMiddleware(AgentMiddleware):
 
         if session_id not in self._injected_sessions:
             memory_ctx = self.memory_manager.load_context(user_ctx.user_id)
+
+            # Mid-term retrieval (sync fallback)
+            mid_term_results = self._retrieve_mid_term_sync(user_ctx.user_id, state)
+            memory_ctx.mid_term_results = mid_term_results
+
             memory_prompt = memory_ctx.to_prompt_section()
-            skill_manifest = self.skill_manager.generate_manifest(user_ctx.role.value)
+            skill_manifest = self.skill_manager.generate_manifest(user_ctx.role.value, skill_names=self.allowed_skills)
 
             if memory_prompt:
                 injection_parts.append(f"--- MEMORY CONTEXT ---\n{memory_prompt}\n--- END MEMORY ---")
 
-            # Plugin manifest (Phase 3) — inject before Skill manifest if plugins > 3
             plugin_manifest = self._get_plugin_manifest()
             if plugin_manifest:
                 injection_parts.append(f"--- AVAILABLE PLUGINS ---\n{plugin_manifest}\n--- END PLUGINS ---")
@@ -81,6 +91,41 @@ class MemoryInjectionMiddleware(AgentMiddleware):
         injection = "\n\n".join(injection_parts)
         return {"messages": [SystemMessage(content=injection)]}
 
+    def _retrieve_mid_term_sync(self, user_id: str, state: AgentState) -> list[str]:
+        """Synchronous fallback for mid-term retrieval (sync before_model can't await)."""
+        import asyncio
+
+        messages = state.get("messages", [])
+        top_k = self.memory_manager.config.mid_term_search_top_k
+
+        last_user_msg = ""
+        for msg in reversed(messages):
+            if isinstance(msg, HumanMessage) and msg.content:
+                last_user_msg = msg.content
+                break
+
+        async def _search():
+            if not messages:
+                return await self.memory_manager.search_mid_term_recent(user_id, top_k=3, days=7)
+            if not last_user_msg or len(last_user_msg) < 5:
+                return await self.memory_manager.search_mid_term_recent(user_id, top_k=3, days=7)
+            return await self.memory_manager.search_mid_term(user_id, query=last_user_msg, top_k=top_k)
+
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # Event loop already running — use run_coroutine_threadsafe or skip
+                return []
+            return loop.run_until_complete(_search())
+        except RuntimeError:
+            # No event loop in this thread — create a new one
+            try:
+                return asyncio.new_event_loop().run_until_complete(_search())
+            except Exception:
+                return []
+        except Exception:
+            return []
+
     async def abefore_model(self, state: AgentState, runtime: Runtime) -> dict[str, Any] | None:
         """Async version — includes mid-term memory retrieval from PG."""
         if runtime is None or runtime.context is None:
@@ -99,7 +144,7 @@ class MemoryInjectionMiddleware(AgentMiddleware):
             memory_ctx.mid_term_results = mid_term_results
 
             memory_prompt = memory_ctx.to_prompt_section()
-            skill_manifest = self.skill_manager.generate_manifest(user_ctx.role.value)
+            skill_manifest = self.skill_manager.generate_manifest(user_ctx.role.value, skill_names=self.allowed_skills)
 
             if memory_prompt:
                 injection_parts.append(f"--- MEMORY CONTEXT ---\n{memory_prompt}\n--- END MEMORY ---")

@@ -49,6 +49,19 @@ memory:
     retention_days: 30
     search_top_k: 5
 
+sandbox:
+  enabled: true
+  backend: agentscope_remote  # agentscope_remote | local_docker | disabled
+  fail_closed: true
+  base_url: "http://sandbox-runtime:8000"
+  bearer_token: ""
+  network_default: deny
+  session_ttl_seconds: 3600
+  docker_image: ai-agent-sandbox:latest
+  auto_build_image: false
+  timeout_seconds: 30
+  max_memory: 256m
+
 security:
   auth:
     jwt_secret: "change-this-in-production"
@@ -134,7 +147,7 @@ skill:
 rbac:
   roles:
     admin:
-      tools: [file_read, file_write, command_exec, web_search, query_database, send_notification, memory_manage]
+      tools: [file_read, file_write, command_exec, python_exec, web_search, query_database, send_notification, memory_manage]
       skill_access: "all"
       approval_level: L3
     manager:

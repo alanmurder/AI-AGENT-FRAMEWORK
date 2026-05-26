@@ -1,8 +1,10 @@
-"""Sandbox base image management — build/pull the Docker image for command execution."""
+"""Sandbox base image management - build/pull the Docker image for command execution."""
 
 import structlog
-import tempfile
 import os
+import shutil
+import uuid
+from pathlib import Path
 
 logger = structlog.get_logger()
 
@@ -50,10 +52,16 @@ class SandboxImageManager:
 
     def _build_image(self, client) -> None:
         """Build the sandbox image from the embedded Dockerfile."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            dockerfile_path = os.path.join(tmpdir, "Dockerfile")
+        tmp_root = Path.cwd() / "data" / "tmp"
+        tmp_root.mkdir(parents=True, exist_ok=True)
+        tmpdir = tmp_root / f"sandbox-build-{uuid.uuid4().hex[:8]}"
+        tmpdir.mkdir(parents=True, exist_ok=False)
+        try:
+            dockerfile_path = os.path.join(str(tmpdir), "Dockerfile")
             with open(dockerfile_path, "w") as f:
                 f.write(SANDBOX_DOCKERFILE)
 
-            client.images.build(path=tmpdir, tag=self.image_name, rm=True)
+            client.images.build(path=str(tmpdir), tag=self.image_name, rm=True)
             logger.info("sandbox_image_built", image=self.image_name)
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)

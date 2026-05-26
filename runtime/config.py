@@ -95,8 +95,15 @@ class AgentConfig(BaseSettings):
     static_dir: str = "web/dist"
     static_url_path: str = "/"
 
-    # Sandbox (Phase 2)
-    sandbox_enabled: bool = False
+    # Sandbox (Phase 2+)
+    sandbox_enabled: bool = True
+    sandbox_backend: str = "agentscope_remote"  # agentscope_remote | local_docker | disabled
+    sandbox_fail_closed: bool = True
+    sandbox_base_url: str = "http://sandbox-runtime:8000"
+    sandbox_bearer_token: str = ""
+    sandbox_network_default: str = "deny"
+    sandbox_session_ttl_seconds: int = 3600
+    sandbox_auto_build_image: bool = False
     sandbox_docker_image: str = "ai-agent-sandbox:latest"
     sandbox_timeout_seconds: int = 30
     sandbox_max_memory: str = "256m"

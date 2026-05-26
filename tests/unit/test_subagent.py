@@ -109,11 +109,13 @@ class TestSpawnSubagentTool:
         tool_names = [t.name for t in BASE_TOOLS]
         assert "spawn_subagent" not in tool_names
 
-    def test_all_tools_count(self):
-        assert len(ALL_TOOLS) == 8
+    def test_all_tools_includes_python_exec(self):
+        tool_names = [t.name for t in ALL_TOOLS]
+        assert "python_exec" in tool_names
 
-    def test_base_tools_count(self):
-        assert len(BASE_TOOLS) == 7
+    def test_base_tools_includes_python_exec(self):
+        tool_names = [t.name for t in BASE_TOOLS]
+        assert "python_exec" in tool_names
 
 
 class TestSubAgentCapableRoles:

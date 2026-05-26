@@ -11,7 +11,7 @@ from harness.expert.types import AgentProfile
 from harness.memory.manager import MemoryManager
 from harness.skill.manager import SkillManager
 from harness.security.approval import ApprovalChecker
-from harness.sandbox.runner import SandboxRunner
+from harness.sandbox.manager import SandboxManager
 from harness.context.types import ContextConfig
 from harness.context.compressor import ContextCompressor, build_context_config
 from harness.context.flush import PreFlushMiddleware
@@ -35,7 +35,7 @@ def create_expert_agent(
     memory_manager: MemoryManager,
     skill_manager: SkillManager,
     approval_checker: ApprovalChecker,
-    sandbox_runner: SandboxRunner | None = None,
+    sandbox_runner: SandboxManager | None = None,
     mcp_manager=None,
 ):
     """Create a full Agent instance for an expert, with SOUL.md, Skills, and MCP tools."""
@@ -72,10 +72,10 @@ def create_expert_agent(
         system_prompt=system_prompt,
         middleware=[
             AuthInjectionMiddleware(user_ctx),
-            MemoryInjectionMiddleware(memory_manager, skill_manager, context_config, agent_config=config),
+            MemoryInjectionMiddleware(memory_manager, skill_manager, context_config, agent_config=config, allowed_skills=profile.skills),
+            PreFlushMiddleware(memory_manager, context_config),
             compressor.create_summarization_middleware(),
             compressor.create_context_editing_middleware(),
-            PreFlushMiddleware(memory_manager, context_config),
             ToolFilterMiddleware(),
             SecurityCheckMiddleware(approval_checker),
             SandboxMiddleware(sandbox_runner),
@@ -94,7 +94,7 @@ def create_expert_agent_for_user(
     memory_manager: MemoryManager,
     skill_manager: SkillManager,
     approval_checker: ApprovalChecker,
-    sandbox_runner: SandboxRunner | None = None,
+    sandbox_runner: SandboxManager | None = None,
     mcp_manager=None,
 ):
     """Create an expert agent that operates under the agent's configured role.

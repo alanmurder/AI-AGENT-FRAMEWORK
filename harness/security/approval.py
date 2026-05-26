@@ -255,6 +255,14 @@ class ApprovalChecker:
                     details="Non-SELECT SQL queries are blocked at L2 level. Only read-only database access is permitted.",
                 )
 
+        elif tool_name == "python_exec":
+            return ApprovalResult(
+                approved=False,
+                level=ApprovalLevel.L2,
+                reason="Python execution requires higher approval",
+                details="Python code execution is always reviewed above L2 before sandbox execution.",
+            )
+
         elif tool_name == "file_write":
             # Check path safety — block writing to system directories
             path = content.strip() if content.strip() else ""

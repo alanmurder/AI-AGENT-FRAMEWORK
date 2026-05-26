@@ -194,6 +194,21 @@ class MidTermMemory:
                 )
             return [row["content"] for row in rows]
 
+    async def list_recent_users(self, hours: int = 1) -> list[str]:
+        """Return distinct user IDs with activity in the last N hours."""
+        since = datetime.now() - timedelta(hours=hours)
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT DISTINCT user_id
+                FROM mid_term_memory
+                WHERE archived_at IS NULL
+                  AND created_at >= $1
+                """,
+                since,
+            )
+            return [r["user_id"] for r in rows]
+
     async def archive_expired(self) -> int:
         """Archive entries older than retention_days. Returns count archived."""
         cutoff = datetime.now() - timedelta(days=self.config.mid_term_retention_days)

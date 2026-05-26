@@ -1,5 +1,6 @@
-"""Heartbeat scheduler — periodic agent health-check and proactive monitoring."""
+"""Heartbeat scheduler — periodic agent health-check, proactive monitoring, and memory extraction."""
 
+import asyncio
 import uuid
 from datetime import datetime
 
@@ -20,10 +21,11 @@ HEARTBEAT_PROMPT = (
 
 
 class HeartbeatScheduler:
-    """Triggers periodic agent wake-ups for proactive monitoring.
+    """Triggers periodic agent wake-ups and memory extraction tasks.
 
-    Every heartbeat cycle, the agent 'wakes up', evaluates its state,
-    checks for anomalies, and optionally pushes notifications to the user.
+    Every heartbeat cycle:
+    - Agent wake-up: evaluates state, checks anomalies (per registered user)
+    - Memory heartbeat: batch-extracts cross-session facts/prefs from PG summaries
     """
 
     def __init__(self, config: AgentConfig, interval_minutes: int = 30):
@@ -31,10 +33,15 @@ class HeartbeatScheduler:
         self.interval_minutes = interval_minutes
         self._scheduler = BackgroundScheduler()
         self._user_callbacks: dict[str, callable] = {}
+        self._async_tasks: list = []  # (task, name) tuples
 
     def register_user(self, user_id: str, callback: callable) -> None:
         """Register a callback to be invoked when heartbeat completes for a user."""
         self._user_callbacks[user_id] = callback
+
+    def register_async_task(self, task, name: str) -> None:
+        """Register an async callable to run on each heartbeat cycle."""
+        self._async_tasks.append((task, name))
 
     def start(self) -> None:
         """Start the heartbeat scheduler."""
@@ -52,14 +59,22 @@ class HeartbeatScheduler:
         self._scheduler.shutdown(wait=False)
 
     def _run_heartbeat(self) -> None:
-        """Execute heartbeat for all registered users."""
+        """Execute heartbeat for all registered users + async memory tasks."""
         for user_id, callback in self._user_callbacks.items():
             try:
                 result = self.execute_heartbeat(user_id)
                 if callback:
                     callback(result)
             except Exception:
-                pass  # Log error but continue with other users
+                pass
+
+        # Run registered async tasks (e.g. MemoryHeartbeatTask)
+        for task, name in self._async_tasks:
+            try:
+                asyncio.new_event_loop().run_until_complete(task.run())
+            except Exception:
+                import structlog
+                structlog.get_logger().warning("heartbeat_async_task_failed", name=name)
 
     def execute_heartbeat(self, user_id: str) -> HeartbeatResult:
         """Execute a single heartbeat check for a user.
@@ -82,6 +97,7 @@ class HeartbeatScheduler:
         from harness.memory.manager import MemoryManager
         from harness.skill.manager import SkillManager
         from harness.security.approval import ApprovalChecker
+        from harness.sandbox.manager import SandboxManager
         from runtime.models import create_mini_model
         from pathlib import Path
 
@@ -93,7 +109,7 @@ class HeartbeatScheduler:
 
         mm.init_user(user_id)
 
-        agent = create_agent_for_user(user_ctx, self.config, mm, sm, ac, sandbox_runner=None)
+        agent = create_agent_for_user(user_ctx, self.config, mm, sm, ac, sandbox_runner=SandboxManager.from_config(self.config))
 
         result = agent.invoke(
             {"messages": [{"role": "user", "content": HEARTBEAT_PROMPT}]},

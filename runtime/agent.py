@@ -19,7 +19,7 @@ from harness.middleware.security_check import SecurityCheckMiddleware
 from harness.middleware.output_validation import OutputValidationMiddleware
 from harness.middleware.memory_archive import MemoryArchiveMiddleware
 from harness.middleware.sandbox import SandboxMiddleware
-from harness.sandbox.runner import SandboxRunner
+from harness.sandbox.manager import SandboxManager
 
 
 # Roles that can use spawn_subagent tool
@@ -35,7 +35,7 @@ def create_agent_for_user(
     memory_manager: MemoryManager,
     skill_manager: SkillManager,
     approval_checker: ApprovalChecker,
-    sandbox_runner: SandboxRunner | None = None,
+    sandbox_runner: SandboxManager | None = None,
     mcp_manager=None,
 ):
     """Create a configured agent instance for a specific user.
@@ -100,9 +100,9 @@ def create_agent_for_user(
         middleware=[
             AuthInjectionMiddleware(user_ctx),
             MemoryInjectionMiddleware(memory_manager, skill_manager, context_config, agent_config=config),
+            PreFlushMiddleware(memory_manager, context_config),
             compressor.create_summarization_middleware(),
             compressor.create_context_editing_middleware(),
-            PreFlushMiddleware(memory_manager, context_config),
             ToolFilterMiddleware(),
             SecurityCheckMiddleware(approval_checker),
             SandboxMiddleware(sandbox_runner),

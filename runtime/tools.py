@@ -1,4 +1,4 @@
-"""Seven base tools for the AI Agent Platform."""
+"""Base tools for the AI Agent Platform."""
 
 import os
 import subprocess
@@ -10,6 +10,15 @@ from pathlib import Path
 from typing import Optional
 
 from langchain.tools import tool
+
+# Module-level reference — set by gateway at startup
+_background_manager = None
+
+
+def set_background_manager(manager) -> None:
+    """Register the background task manager for use by submit_background_task tool."""
+    global _background_manager
+    _background_manager = manager
 
 
 @tool
@@ -65,6 +74,16 @@ def command_exec(command: str, timeout: int = 30) -> str:
         return f"Command timed out after {timeout}s"
     except Exception as e:
         return f"Error executing command: {e}"
+
+
+@tool
+def python_exec(code: str, timeout: int = 30) -> str:
+    """Execute Python code inside the configured sandbox.
+
+    This tool is intentionally not implemented on the host. SandboxMiddleware
+    intercepts it and routes execution to SandboxManager.
+    """
+    return "Error: python_exec requires an enabled sandbox backend."
 
 
 @tool
@@ -295,6 +314,44 @@ def spawn_subagent(role: str, task: str, system_prompt: str = "", expert_id: str
 
 
 @tool
+def submit_background_task(name: str, prompt: str, user_id: str = "default") -> str:
+    """Submit an async background task and return immediately with a task_id.
+    Unlike spawn_subagent which blocks and waits, this fires and forgets.
+    Use this for long-running or non-urgent work: data analysis, report generation,
+    batch processing. Check results later with the background task API.
+    Returns the task_id for status tracking."""
+    if _background_manager is None:
+        return "Error: Background task manager is not available"
+
+    import asyncio
+
+    async def _submit():
+        return await _background_manager.submit(name=name, prompt=prompt, user_id=user_id)
+
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            import concurrent.futures
+            future = concurrent.futures.Future()
+
+            async def _run():
+                try:
+                    tid = await _background_manager.submit(name=name, prompt=prompt, user_id=user_id)
+                    future.set_result(tid)
+                except Exception as e:
+                    future.set_exception(e)
+
+            loop.call_soon_threadsafe(asyncio.ensure_future, _run())
+            tid = future.result(timeout=30)
+        else:
+            tid = loop.run_until_complete(_submit())
+    except RuntimeError:
+        tid = asyncio.new_event_loop().run_until_complete(_submit())
+
+    return f"Background task submitted successfully. task_id: {tid}. Use the background task API to check status."
+
+
+@tool
 def delegate_task(task_description: str, role_prompt: str, context: str = "", assignee: str = "", dependencies: list[str] = []) -> str:
     """Delegate a sub-task to a team member or publish to TaskBoard. Captain tool only.
     task_description: what the member should do
@@ -364,7 +421,7 @@ def collect_results() -> str:
         return f"Error collecting results: {e}"
 
 
-ALL_TOOLS = [file_read, file_write, command_exec, web_search, query_database, send_notification, memory_manage, spawn_subagent]
-CAPTAIN_TOOLS = [file_read, file_write, command_exec, web_search, query_database, send_notification, memory_manage, spawn_subagent, delegate_task, read_task_board, collect_results]
-MEMBER_TOOLS = [file_read, file_write, command_exec, web_search, query_database, send_notification, memory_manage, read_task_board]
-BASE_TOOLS = [file_read, file_write, command_exec, web_search, query_database, send_notification, memory_manage]
+ALL_TOOLS = [file_read, file_write, command_exec, python_exec, web_search, query_database, send_notification, memory_manage, spawn_subagent, submit_background_task]
+CAPTAIN_TOOLS = [file_read, file_write, command_exec, python_exec, web_search, query_database, send_notification, memory_manage, spawn_subagent, submit_background_task, delegate_task, read_task_board, collect_results]
+MEMBER_TOOLS = [file_read, file_write, command_exec, python_exec, web_search, query_database, send_notification, memory_manage, read_task_board]
+BASE_TOOLS = [file_read, file_write, command_exec, python_exec, web_search, query_database, send_notification, memory_manage]

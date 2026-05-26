@@ -25,17 +25,24 @@ class SkillManager:
             extension_dir=root / "skills" / "extensions",
         )
 
-    def generate_manifest(self, user_skill_access: str | None = None) -> str:
+    def generate_manifest(
+        self, user_skill_access: str | None = None,
+        skill_names: list[str] | None = None,
+    ) -> str:
         """Generate skill manifest text for prompt injection (~200 tokens).
 
         user_skill_access: optional role skill_access value for filtering
         (e.g. 'admin', 'manager', 'operator', 'viewer').
+        skill_names: if provided (non-None), further filter to only these skill names.
         """
-        return self.manifest_gen.generate_text(user_skill_access)
+        return self.manifest_gen.generate_text(user_skill_access, skill_names)
 
-    def get_manifest(self, user_skill_access: str | None = None) -> SkillManifest:
-        """Get full SkillManifest object. Pass user_skill_access to filter."""
-        return self.manifest_gen.generate(user_skill_access)
+    def get_manifest(
+        self, user_skill_access: str | None = None,
+        skill_names: list[str] | None = None,
+    ) -> SkillManifest:
+        """Get full SkillManifest object. Pass user_skill_access / skill_names to filter."""
+        return self.manifest_gen.generate(user_skill_access, skill_names)
 
     def load_skill_content(self, skill_name: str) -> str | None:
         """Load full SKILL.md content for a specific skill (for on-demand reading)."""

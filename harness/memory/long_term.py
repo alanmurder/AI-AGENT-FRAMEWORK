@@ -57,16 +57,26 @@ class LongTermMemory:
         log_path.write_text(existing + "\n" + content, encoding="utf-8")
 
     def read_daily_log(self, user_id: str, date: Optional[str] = None) -> str:
-        """Read a daily log. Defaults to today + yesterday."""
+        """Read daily log summary.
+
+        Returns only the tail (~500 chars) of today's log as a lightweight
+        recent-activity hint. Detailed historical context comes from mid-term
+        (PG/pgvector semantic search), not from daily log bloat.
+        """
         if date is None:
-            today = datetime.now().strftime("%Y-%m-%d")
-            yesterday = (datetime.now() - __import__("datetime").timedelta(days=1)).strftime("%Y-%m-%d")
-            content = ""
-            for d in [today, yesterday]:
-                path = self._user_dir(user_id) / "memory" / f"{d}.md"
-                if path.exists():
-                    content += path.read_text(encoding="utf-8") + "\n"
-            return content
+            date = datetime.now().strftime("%Y-%m-%d")
+        path = self._user_dir(user_id) / "memory" / f"{date}.md"
+        if not path.exists():
+            return ""
+        content = path.read_text(encoding="utf-8")
+        if len(content) > 500:
+            content = "...(earlier) " + content[-500:]
+        return content
+
+    def read_daily_log_full(self, user_id: str, date: Optional[str] = None) -> str:
+        """Read full daily log (for admin review, not for context injection)."""
+        if date is None:
+            date = datetime.now().strftime("%Y-%m-%d")
         path = self._user_dir(user_id) / "memory" / f"{date}.md"
         return path.read_text(encoding="utf-8") if path.exists() else ""
 

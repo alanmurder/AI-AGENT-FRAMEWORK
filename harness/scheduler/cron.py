@@ -123,6 +123,7 @@ class CronScheduler:
         from harness.memory.manager import MemoryManager
         from harness.skill.manager import SkillManager
         from harness.security.approval import ApprovalChecker
+        from harness.sandbox.manager import SandboxManager
         from runtime.models import create_mini_model
         from pathlib import Path
 
@@ -134,7 +135,7 @@ class CronScheduler:
 
         mm.init_user(task.user_id)
 
-        agent = create_agent_for_user(user_ctx, self.config, mm, sm, ac, sandbox_runner=None)
+        agent = create_agent_for_user(user_ctx, self.config, mm, sm, ac, sandbox_runner=SandboxManager.from_config(self.config))
 
         result = agent.invoke(
             {"messages": [{"role": "user", "content": task.prompt}]},

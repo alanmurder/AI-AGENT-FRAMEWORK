@@ -10,7 +10,7 @@ from runtime.tools import BASE_TOOLS
 from harness.memory.manager import MemoryManager
 from harness.skill.manager import SkillManager
 from harness.security.approval import ApprovalChecker
-from harness.sandbox.runner import SandboxRunner
+from harness.sandbox.manager import SandboxManager
 from harness.multi_agent.types import (
     SubAgentConfig,
     SubAgentResult,
@@ -31,7 +31,7 @@ class SubAgentRunner:
         memory_manager: MemoryManager,
         skill_manager: SkillManager,
         approval_checker: ApprovalChecker,
-        sandbox_runner: SandboxRunner | None = None,
+        sandbox_runner: SandboxManager | None = None,
     ):
         self.config = config
         self.memory_manager = memory_manager

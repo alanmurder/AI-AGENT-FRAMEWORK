@@ -99,6 +99,34 @@ def test_l2_file_write_safe_path():
     assert result.approved
 
 
+def test_l2_python_exec_requires_higher_approval():
+    checker = ApprovalChecker()
+    result = checker.check("print('hello')", "python_exec", None)
+    assert not result.approved
+    assert result.level == ApprovalLevel.L2
+    assert "Python execution" in result.reason
+
+
+def test_security_middleware_checks_file_write_path():
+    from harness.middleware.security_check import SecurityCheckMiddleware
+
+    middleware = SecurityCheckMiddleware(ApprovalChecker())
+    request = MagicMock()
+    request.tool_call = {
+        "id": "tc1",
+        "name": "file_write",
+        "args": {"path": "/etc/config.json", "content": "safe content"},
+    }
+    request.runtime = None
+    handler = MagicMock()
+
+    msg = middleware.wrap_tool_call(request, handler)
+
+    assert "Operation blocked by security policy" in msg.content
+    assert "Level: L2" in msg.content
+    handler.assert_not_called()
+
+
 # --- L3 Tests ---
 
 
