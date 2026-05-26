@@ -3,6 +3,7 @@
 from harness.security.rbac import (
     get_role_mcp_tool_access,
     get_role_skill_access,
+    mcp_tool_allowed,
     role_allows_skill,
 )
 from harness.skill.types import SkillInfo
@@ -55,13 +56,8 @@ class ExpertAgentValidator:
 
         valid = []
         for tool in mcp_tools:
-            if tool in allowed:
+            if mcp_tool_allowed(tool, allowed):
                 valid.append(tool)
-                continue
-            for pattern in allowed:
-                if pattern.endswith(":*") and tool.startswith(pattern[:-2] + ":"):
-                    valid.append(tool)
-                    break
 
         rejected = [t for t in mcp_tools if t not in valid]
         if rejected:

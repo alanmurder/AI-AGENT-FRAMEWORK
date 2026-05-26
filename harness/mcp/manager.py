@@ -187,13 +187,6 @@ def func_name_to_full_name(func_name: str) -> str:
 
 def _match_allowed(full_name: str, allowed: list[str]) -> bool:
     """Check if a 'server:tool' name matches the allowed list (supports wildcards)."""
-    for pattern in allowed:
-        if pattern == full_name:
-            return True
-        if pattern.endswith(":*"):
-            prefix = pattern[:-2]
-            if full_name.startswith(prefix + ":"):
-                return True
-        if pattern == "*":
-            return True
-    return False
+    from harness.security.rbac import mcp_tool_allowed
+
+    return mcp_tool_allowed(full_name, allowed)

@@ -267,14 +267,17 @@ def test_set_mcp_server_roles_replaces_only_target_server_entries(
 
     roles = _load(path)["rbac"]["roles"]
     assert roles["admin"]["mcp_tools"] == ["*", "github:search"]
+    assert roles["admin"]["mcp_tools_denied"] == ["database:*"]
     assert roles["manager"]["mcp_tools"] == ["filesystem:read", "slack:post"]
     assert roles["operator"]["mcp_tools"] == ["other:*", "database:*"]
     assert roles["viewer"]["mcp_tools"] == ["database:*"]
     assert set(rbac.roles_for_mcp_server("database")) == {
-        UserRole.ADMIN,
         UserRole.OPERATOR,
         UserRole.VIEWER,
     }
+    assert set(rbac.roles_for_mcp_server("future")) == {UserRole.ADMIN}
+    assert rbac.mcp_tool_allowed("database:query", rbac.get_role_mcp_tool_access()[UserRole.ADMIN]) is False
+    assert rbac.mcp_tool_allowed("future:query", rbac.get_role_mcp_tool_access()[UserRole.ADMIN]) is True
 
 
 def test_skill_manager_list_skills_for_role_filters_with_exact_rbac(

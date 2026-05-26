@@ -203,16 +203,17 @@ def test_put_mcp_server_roles_updates_yaml(rbac_api):
     )
 
     assert response.status_code == 200
-    assert response.json() == {"name": "filesystem", "roles": ["admin", "viewer"]}
+    assert response.json() == {"name": "filesystem", "roles": ["viewer"]}
     roles = _load(rbac_api.path)["rbac"]["roles"]
     assert roles["admin"]["mcp_tools"] == ["*"]
+    assert roles["admin"]["mcp_tools_denied"] == ["filesystem:*"]
     assert roles["manager"]["mcp_tools"] == ["github:search"]
     assert roles["operator"]["mcp_tools"] == []
     assert roles["viewer"]["mcp_tools"] == ["filesystem:*"]
 
     resources = rbac_api.client.get("/api/rbac/resources").json()
     filesystem = next(s for s in resources["mcp_servers"] if s["name"] == "filesystem")
-    assert filesystem["roles"] == ["admin", "viewer"]
+    assert filesystem["roles"] == ["viewer"]
 
 
 def test_put_mcp_server_roles_rejects_unknown_server(rbac_api):
@@ -247,7 +248,7 @@ def test_put_mcp_server_roles_accepts_encoded_slash_server_name(rbac_api, monkey
     )
 
     assert response.status_code == 200
-    assert response.json() == {"name": "folder/server", "roles": ["admin", "viewer"]}
+    assert response.json() == {"name": "folder/server", "roles": ["viewer"]}
 
 
 def test_put_mcp_server_roles_rejects_invalid_role(rbac_api):

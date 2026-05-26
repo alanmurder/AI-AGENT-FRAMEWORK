@@ -1005,32 +1005,23 @@ async def list_mcp_tools(role: str = "", authorization: str = Header(default=Non
     if user_ctx is None:
         return {"tools": []}
 
-    from harness.security.rbac import get_role_mcp_tool_access
+    from harness.security.rbac import get_role_mcp_tool_access, mcp_tool_allowed
     allowed = get_role_mcp_tool_access().get(user_ctx.role, [])
 
-    # Admin wildcard: show all
-    if "*" in allowed:
-        all_tools = mcp_manager.get_all_tools_info()
-    else:
-        all_tools = [
-            t for t in mcp_manager.get_all_tools_info()
-            if t.full_name in allowed or any(
-                p.endswith(":*") and t.full_name.startswith(p[:-2] + ":") for p in allowed
-            )
-        ]
+    all_tools = [
+        t for t in mcp_manager.get_all_tools_info()
+        if mcp_tool_allowed(t.full_name, allowed)
+    ]
 
     # Further filter by requested role (for admin viewing other roles)
     if role:
         try:
             target = UserRole(role)
             target_allowed = get_role_mcp_tool_access().get(target, [])
-            if "*" not in target_allowed and "*" not in allowed:
-                all_tools = [
-                    t for t in all_tools
-                    if t.full_name in target_allowed or any(
-                        p.endswith(":*") and t.full_name.startswith(p[:-2] + ":") for p in target_allowed
-                    )
-                ]
+            all_tools = [
+                t for t in all_tools
+                if mcp_tool_allowed(t.full_name, target_allowed)
+            ]
         except ValueError:
             pass
 

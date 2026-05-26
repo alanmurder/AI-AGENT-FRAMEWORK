@@ -5,7 +5,7 @@ from collections.abc import Callable
 from langchain.agents.middleware import AgentMiddleware, ModelRequest, ModelResponse
 
 from runtime.context_schema import UserContext, UserRole
-from harness.security.rbac import get_role_tool_access, get_role_mcp_tool_access
+from harness.security.rbac import get_role_tool_access, get_role_mcp_tool_access, mcp_tool_allowed
 
 # Reference to MCP manager (set at startup by gateway server)
 _mcp_manager = None
@@ -33,16 +33,7 @@ def _mcp_full_name(tool_name: str) -> str:
 
 def _match_mcp_allowed(full_name: str, allowed: list[str]) -> bool:
     """Check if a 'server:tool' name matches the allowed list (supports 'server:*' and '*')."""
-    for pattern in allowed:
-        if pattern == "*":
-            return True
-        if pattern == full_name:
-            return True
-        if pattern.endswith(":*"):
-            prefix = pattern[:-2]
-            if full_name.startswith(prefix + ":"):
-                return True
-    return False
+    return mcp_tool_allowed(full_name, allowed)
 
 
 class ToolFilterMiddleware(AgentMiddleware):

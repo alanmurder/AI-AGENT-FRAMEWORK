@@ -76,7 +76,11 @@ def build_role_mcp_tool_access(rbac_config: dict) -> dict[UserRole, list[str]]:
 
     for role_name, role_data in roles_section.items():
         role_enum = UserRole(role_name)
-        role_map[role_enum] = role_data.get("mcp_tools", [])
+        denied = [f"!{entry}" for entry in role_data.get("mcp_tools_denied", []) or []]
+        role_map[role_enum] = [
+            *(role_data.get("mcp_tools", []) or []),
+            *denied,
+        ]
 
     for role in UserRole:
         if role not in role_map:
@@ -92,6 +96,27 @@ def get_role_mcp_tool_access() -> dict[UserRole, list[str]]:
         config = load_rbac_config()
         _ROLE_MCP_TOOL_ACCESS_CACHE = build_role_mcp_tool_access(config)
     return _ROLE_MCP_TOOL_ACCESS_CACHE
+
+
+def _mcp_pattern_matches(full_name: str, pattern: str) -> bool:
+    if pattern == "*":
+        return True
+    if pattern == full_name:
+        return True
+    if pattern.endswith(":*"):
+        prefix = pattern[:-2]
+        return full_name.startswith(prefix + ":")
+    return False
+
+
+def mcp_tool_allowed(full_name: str, allowed: Sequence[str]) -> bool:
+    """Return whether an MCP server:tool name is allowed, honoring ! deny patterns."""
+    for pattern in allowed:
+        if isinstance(pattern, str) and pattern.startswith("!"):
+            if _mcp_pattern_matches(full_name, pattern[1:]):
+                return False
+
+    return any(_mcp_pattern_matches(full_name, pattern) for pattern in allowed)
 
 
 def get_role_skill_access(role: UserRole) -> str:
@@ -236,10 +261,15 @@ def roles_for_mcp_server(server_name: str) -> list[UserRole]:
     config = load_rbac_config()
     roles_section = config.get("rbac", {}).get("roles", {})
     server_prefix = f"{server_name}:"
+    server_wildcard = f"{server_name}:*"
     roles: list[UserRole] = []
 
     for role in UserRole:
-        entries = roles_section.get(role.value, {}).get("mcp_tools", []) or []
+        role_data = roles_section.get(role.value, {})
+        entries = role_data.get("mcp_tools", []) or []
+        denied = role_data.get("mcp_tools_denied", []) or []
+        if "*" in denied or server_wildcard in denied:
+            continue
         if "*" in entries or any(entry.startswith(server_prefix) for entry in entries):
             roles.append(role)
 
@@ -260,13 +290,24 @@ def set_mcp_server_roles(
     for role in UserRole:
         role_data = roles_section.setdefault(role.value, {})
         current_entries = role_data.get("mcp_tools", []) or []
+        current_denied = [
+            entry for entry in role_data.get("mcp_tools_denied", []) or []
+            if entry != server_wildcard and not entry.startswith(server_prefix)
+        ]
         next_entries = [
             entry
             for entry in current_entries
             if entry != server_wildcard and not entry.startswith(server_prefix)
         ]
         if role in selected_roles:
-            next_entries.append(server_wildcard)
+            if "*" not in current_entries:
+                next_entries.append(server_wildcard)
+        elif "*" in current_entries:
+            current_denied.append(server_wildcard)
         role_data["mcp_tools"] = list(dict.fromkeys(next_entries))
+        if current_denied:
+            role_data["mcp_tools_denied"] = list(dict.fromkeys(current_denied))
+        else:
+            role_data.pop("mcp_tools_denied", None)
 
     save_rbac_config(config)
