@@ -227,3 +227,26 @@ export interface RoleMCPToolInfo {
   description: string;
   allowed: boolean;
 }
+
+export interface RbacSkillResource {
+  name: string;
+  description: string;
+  access: string;
+  roles: UserRole[];
+}
+
+export interface RbacMCPServerResource {
+  name: string;
+  enabled: boolean;
+  roles: UserRole[];
+}
+
+export interface RbacResources {
+  roles: UserRole[];
+  skills: RbacSkillResource[];
+  mcp_servers: RbacMCPServerResource[];
+}
+
+export interface ResourceRolesUpdate {
+  roles: UserRole[];
+}

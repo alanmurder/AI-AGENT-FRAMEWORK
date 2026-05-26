@@ -1,6 +1,15 @@
 import { create } from 'zustand';
-import type { ApprovalItem, CronTaskItem, BackgroundTaskItem, PluginInfo, SkillInfo } from '../types/api';
+import type {
+  ApprovalItem,
+  CronTaskItem,
+  BackgroundTaskItem,
+  PluginInfo,
+  RbacResources,
+  SkillInfo,
+  UserRole,
+} from '../types/api';
 import * as adminApi from '../api/admin';
+import * as rbacApi from '../api/rbac';
 
 interface AdminState {
   pendingApprovals: ApprovalItem[];
@@ -8,6 +17,7 @@ interface AdminState {
   backgroundTasks: BackgroundTaskItem[];
   skills: SkillInfo[];
   plugins: PluginInfo[];
+  rbacResources: RbacResources | null;
 
   loadPendingApprovals: () => Promise<void>;
   approve: (id: string) => Promise<void>;
@@ -18,14 +28,18 @@ interface AdminState {
   loadBackgroundTasks: (userId: string) => Promise<void>;
   loadSkills: () => Promise<void>;
   loadPlugins: () => Promise<void>;
+  loadRbacResources: () => Promise<void>;
+  updateSkillRoles: (skillName: string, roles: UserRole[]) => Promise<void>;
+  updateMCPServerRoles: (serverName: string, roles: UserRole[]) => Promise<void>;
 }
 
-export const useAdminStore = create<AdminState>((set) => ({
+export const useAdminStore = create<AdminState>((set, get) => ({
   pendingApprovals: [],
   cronTasks: [],
   backgroundTasks: [],
   skills: [],
   plugins: [],
+  rbacResources: null,
 
   loadPendingApprovals: async () => {
     const res = await adminApi.listPendingApprovals();
@@ -78,5 +92,20 @@ export const useAdminStore = create<AdminState>((set) => ({
   loadPlugins: async () => {
     const res = await adminApi.listPlugins();
     set({ plugins: res.plugins });
+  },
+
+  loadRbacResources: async () => {
+    const rbacResources = await rbacApi.getRbacResources();
+    set({ rbacResources });
+  },
+
+  updateSkillRoles: async (skillName, roles) => {
+    await rbacApi.updateSkillRoles(skillName, roles);
+    await get().loadRbacResources();
+  },
+
+  updateMCPServerRoles: async (serverName, roles) => {
+    await rbacApi.updateMCPServerRoles(serverName, roles);
+    await get().loadRbacResources();
   },
 }));
