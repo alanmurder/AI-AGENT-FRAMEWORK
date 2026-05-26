@@ -41,7 +41,7 @@ from harness.multi_agent.subagent import SubAgentRunner
 from harness.skill.plugin import PluginManager
 from harness.expert.registry import AgentRegistry
 from harness.expert.agent_factory import create_expert_agent
-from harness.expert.types import EndpointConfig
+from harness.expert.types import AgentProfile, EndpointConfig
 from harness.external_agent.types import ExternalEndpoint, get_adapter
 from harness.external_agent.proxy import AgentProxyHandler
 
@@ -1016,7 +1016,8 @@ async def create_agent(req: CreateAgentRequest, authorization: str = Header(defa
         valid_mcp = []
         soul_path = ""
     else:
-        valid_skills = ExpertAgentValidator.validate_skills_from_profile(req.role, req.skills)
+        all_skills = skill_manager.list_skills() if hasattr(skill_manager, "list_skills") else []
+        valid_skills = ExpertAgentValidator.validate_skills_from_profile(req.role, req.skills, all_skills)
         valid_mcp = ExpertAgentValidator.validate_mcp_tools_from_profile(req.role, req.mcp_tools)
         soul_path = str(expert_registry.store.save_soul(req.name, req.soul_content))
 
@@ -1093,8 +1094,13 @@ async def update_agent(name: str, req: UpdateAgentRequest, authorization: str = 
     # If switching to external, skip skill/mcp/soul validation
     is_external = profile.type == "external"
 
-    if req.skills is not None and not is_external:
-        profile.skills = ExpertAgentValidator.validate_skills_from_profile(profile.role, req.skills)
+    if not is_external and (req.skills is not None or req.role is not None):
+        all_skills = skill_manager.list_skills() if hasattr(skill_manager, "list_skills") else []
+        profile.skills = ExpertAgentValidator.validate_skills_from_profile(
+            profile.role,
+            req.skills if req.skills is not None else profile.skills,
+            all_skills,
+        )
     if req.mcp_tools is not None and not is_external:
         profile.mcp_tools = ExpertAgentValidator.validate_mcp_tools_from_profile(profile.role, req.mcp_tools)
     if req.model_preference is not None:

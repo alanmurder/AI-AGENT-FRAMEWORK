@@ -1,7 +1,11 @@
 """ExpertAgentValidator — privilege escalation prevention for expert agents."""
 
-from harness.security.rbac import get_role_mcp_tool_access, get_role_skill_access
-from harness.skill.types import SkillAccess, SkillInfo
+from harness.security.rbac import (
+    get_role_mcp_tool_access,
+    get_role_skill_access,
+    role_allows_skill,
+)
+from harness.skill.types import SkillInfo
 from runtime.context_schema import UserRole
 
 
@@ -9,15 +13,24 @@ class ExpertAgentValidator:
     """Validates expert agent configurations to prevent privilege escalation."""
 
     @staticmethod
-    def validate_skills_from_profile(role: str, skills: list[str]) -> list[str]:
+    def validate_skills_from_profile(
+        role: str,
+        skills: list[str],
+        all_skills: list[SkillInfo] | None = None,
+    ) -> list[str]:
         """Return only skills allowed for the given role (convenience for API endpoints)."""
-        max_level = SkillAccess.max_for_role(role)
+        role_enum = UserRole(role)
+        skill_map = {skill.name: skill for skill in all_skills or []}
         valid = []
+        rejected = []
         for skill_name in skills:
-            skill_obj = ExpertAgentValidator._get_skill_info(skill_name)
-            if skill_obj is None or skill_obj.access.level <= max_level:
+            skill_obj = skill_map.get(skill_name)
+            if skill_obj is None:
+                skill_obj = ExpertAgentValidator._get_skill_info(skill_name)
+            if skill_obj is None or role_allows_skill(role_enum, skill_obj):
                 valid.append(skill_name)
-        rejected = [s for s in skills if s not in valid]
+            else:
+                rejected.append(skill_name)
         if rejected:
             from structlog import get_logger
             get_logger().warning("skill_privilege_escalation_blocked", role=role, rejected=rejected)

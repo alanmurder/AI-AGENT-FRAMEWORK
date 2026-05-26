@@ -2,8 +2,10 @@
 
 from pathlib import Path
 
+from harness.security.rbac import role_allows_skill
 from harness.skill.manifest import ManifestGenerator
 from harness.skill.types import SkillManifest
+from runtime.context_schema import UserRole
 from runtime.config import AgentConfig
 
 
@@ -58,3 +60,19 @@ class SkillManager:
         """List all skills as SkillInfo objects (with access levels)."""
         manifest = self.get_manifest()
         return manifest.skills
+
+    def get_skill(self, skill_name: str):
+        """Return a SkillInfo by name, or None when not found."""
+        for skill in self.get_manifest().skills:
+            if skill.name == skill_name:
+                return skill
+        return None
+
+    def list_skills_for_role(self, role) -> list:
+        """List skills the role can access under the RBAC config."""
+        role_enum = role if isinstance(role, UserRole) else UserRole(role)
+        return [
+            skill
+            for skill in self.list_skills()
+            if role_allows_skill(role_enum, skill)
+        ]
