@@ -122,6 +122,14 @@ def _max_skill_level(role: UserRole, role_data: dict) -> int:
 
 
 def _role_allows_skill_from_data(role: UserRole, role_data: dict, skill) -> bool:
+    denied = role_data.get("skills_denied") or []
+    if "*" in denied or skill.name in denied:
+        return False
+
+    allowed_overrides = role_data.get("skills_allowed") or []
+    if "*" in allowed_overrides or skill.name in allowed_overrides:
+        return True
+
     if "skills" in role_data:
         allowed = role_data.get("skills") or []
         return "*" in allowed or skill.name in allowed
@@ -179,20 +187,46 @@ def set_skill_roles(
     all_skills: list,
 ) -> None:
     """Update the exact role allow-list for one skill and persist RBAC config."""
-    _find_skill(skill_name, all_skills)
+    skill = _find_skill(skill_name, all_skills)
     selected_roles = set(normalize_roles(roles))
     config = load_rbac_config()
     roles_section = config.setdefault("rbac", {}).setdefault("roles", {})
 
     for role in UserRole:
         role_data = roles_section.setdefault(role.value, {})
-        current_skills = _effective_skill_names(role, role_data, all_skills)
-        next_skills = [
-            name for name in current_skills if name not in {skill_name, "*"}
+        has_exact_skills = "skills" in role_data
+        current_skills = list(role_data.get("skills") or [])
+        current_allowed = [
+            name for name in role_data.get("skills_allowed", []) if name != skill_name
         ]
+        current_denied = [
+            name for name in role_data.get("skills_denied", []) if name != skill_name
+        ]
+
         if role in selected_roles:
-            next_skills.append(skill_name)
-        role_data["skills"] = sorted(dict.fromkeys(next_skills))
+            if has_exact_skills:
+                if "*" not in current_skills and skill_name not in current_skills:
+                    current_skills.append(skill_name)
+            elif skill.access.level > _max_skill_level(role, role_data):
+                current_allowed.append(skill_name)
+        elif has_exact_skills:
+            if "*" in current_skills:
+                current_denied.append(skill_name)
+            else:
+                current_skills = [name for name in current_skills if name != skill_name]
+        elif skill.access.level <= _max_skill_level(role, role_data):
+            current_denied.append(skill_name)
+
+        if has_exact_skills:
+            role_data["skills"] = sorted(dict.fromkeys(current_skills))
+        if current_allowed:
+            role_data["skills_allowed"] = sorted(dict.fromkeys(current_allowed))
+        else:
+            role_data.pop("skills_allowed", None)
+        if current_denied:
+            role_data["skills_denied"] = sorted(dict.fromkeys(current_denied))
+        else:
+            role_data.pop("skills_denied", None)
 
     save_rbac_config(config)
 

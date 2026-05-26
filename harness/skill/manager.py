@@ -37,13 +37,20 @@ class SkillManager:
         (e.g. 'admin', 'manager', 'operator', 'viewer').
         skill_names: if provided (non-None), further filter to only these skill names.
         """
-        return self.manifest_gen.generate_text(user_skill_access, skill_names)
+        return self.get_manifest(user_skill_access, skill_names).to_text()
 
     def get_manifest(
         self, user_skill_access: str | None = None,
         skill_names: list[str] | None = None,
     ) -> SkillManifest:
         """Get full SkillManifest object. Pass user_skill_access / skill_names to filter."""
+        role = self._as_user_role(user_skill_access)
+        if role is not None:
+            skills = self.list_skills_for_role(role)
+            if skill_names is not None:
+                name_set = set(skill_names)
+                skills = [skill for skill in skills if skill.name in name_set]
+            return SkillManifest(skills=skills)
         return self.manifest_gen.generate(user_skill_access, skill_names)
 
     def load_skill_content(self, skill_name: str) -> str | None:
@@ -76,3 +83,12 @@ class SkillManager:
             for skill in self.list_skills()
             if role_allows_skill(role_enum, skill)
         ]
+
+    @staticmethod
+    def _as_user_role(value) -> UserRole | None:
+        if value is None:
+            return None
+        try:
+            return value if isinstance(value, UserRole) else UserRole(value)
+        except ValueError:
+            return None

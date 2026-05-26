@@ -2,6 +2,14 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import SkillManager from './SkillManager';
 import { useAdminStore } from '../store/adminStore';
+import * as adminApi from '../api/admin';
+
+vi.mock('../api/admin', () => ({
+  verifySkill: vi.fn(),
+  optimizeSkill: vi.fn(),
+  triggerAutoEvolution: vi.fn(),
+  importSkillZip: vi.fn(),
+}));
 
 Object.defineProperty(window, 'matchMedia', {
   writable: true,
@@ -49,7 +57,7 @@ describe('SkillManager role permissions', () => {
     expect(await screen.findByText('file_manager')).toBeTruthy();
 
     fireEvent.click(screen.getByRole('checkbox', { name: 'operator' }));
-    fireEvent.click(screen.getByRole('button', { name: '保存角色权限' }));
+    fireEvent.click(screen.getByRole('button', { name: 'save skill roles' }));
 
     await waitFor(() => {
       expect(updateSkillRoles).toHaveBeenCalledWith('file_manager', ['admin', 'operator']);
@@ -62,6 +70,36 @@ describe('SkillManager role permissions', () => {
     render(<SkillManager />);
 
     expect(await screen.findByText('file_manager')).toBeTruthy();
-    expect((screen.getByRole('button', { name: '保存角色权限' }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole('button', { name: 'save skill roles' }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  test('does not save permissions when skill is missing from RBAC resources', async () => {
+    useAdminStore.setState({
+      skills: [
+        { name: 'file_manager', description: 'Files', category: 'file_manager', access: 'report' },
+        { name: 'new_skill', description: 'New', category: 'file_manager', access: 'report' },
+      ],
+    });
+
+    render(<SkillManager />);
+
+    expect(await screen.findByText('new_skill')).toBeTruthy();
+    const buttons = screen.getAllByRole('button', { name: 'save skill roles' }) as HTMLButtonElement[];
+    expect(buttons[1].disabled).toBe(true);
+  });
+
+  test('refreshes RBAC resources after importing a skill zip', async () => {
+    vi.mocked(adminApi.importSkillZip).mockResolvedValue({ imported: ['new_skill'], skipped: [] });
+
+    const { container } = render(<SkillManager />);
+    const input = container.querySelector('input[type="file"]') as HTMLInputElement;
+    const file = new File(['zip'], 'skill.zip', { type: 'application/zip' });
+
+    fireEvent.change(input, { target: { files: [file] } });
+
+    await waitFor(() => {
+      expect(adminApi.importSkillZip).toHaveBeenCalledWith(file);
+      expect(loadRbacResources).toHaveBeenCalledTimes(2);
+    });
   });
 });

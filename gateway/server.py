@@ -333,9 +333,16 @@ async def register_user(req: RegisterRequest, authorization: str = Header(defaul
 
 
 @app.get("/api/skills")
-async def list_skills():
-    """List available skills."""
-    manifest = skill_manager.get_manifest()
+async def list_skills(authorization: str = Header(default=None)):
+    """List available skills for the authenticated user's role."""
+    user_ctx = authenticate_optional(authorization)
+    if user_ctx is None:
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    from harness.skill.types import SkillManifest
+
+    skills = skill_manager.list_skills_for_role(user_ctx.role)
+    manifest = SkillManifest(skills=skills)
     return {
         "manifest": manifest.to_text(),
         "skills": [
@@ -1112,7 +1119,10 @@ async def create_agent(req: CreateAgentRequest, authorization: str = Header(defa
         soul_path = ""
     else:
         all_skills = skill_manager.list_skills() if hasattr(skill_manager, "list_skills") else []
-        valid_skills = ExpertAgentValidator.validate_skills_from_profile(req.role, req.skills, all_skills)
+        try:
+            valid_skills = ExpertAgentValidator.validate_skills_from_profile(req.role, req.skills, all_skills)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         valid_mcp = ExpertAgentValidator.validate_mcp_tools_from_profile(req.role, req.mcp_tools)
         soul_path = str(expert_registry.store.save_soul(req.name, req.soul_content))
 
@@ -1191,11 +1201,14 @@ async def update_agent(name: str, req: UpdateAgentRequest, authorization: str = 
 
     if not is_external and (req.skills is not None or req.role is not None):
         all_skills = skill_manager.list_skills() if hasattr(skill_manager, "list_skills") else []
-        profile.skills = ExpertAgentValidator.validate_skills_from_profile(
-            profile.role,
-            req.skills if req.skills is not None else profile.skills,
-            all_skills,
-        )
+        try:
+            profile.skills = ExpertAgentValidator.validate_skills_from_profile(
+                profile.role,
+                req.skills if req.skills is not None else profile.skills,
+                all_skills,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not is_external and (req.mcp_tools is not None or req.role is not None):
         profile.mcp_tools = ExpertAgentValidator.validate_mcp_tools_from_profile(
             profile.role,

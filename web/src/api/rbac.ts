@@ -13,12 +13,12 @@ export async function getRbacResources(): Promise<RbacResources> {
 
 export async function updateSkillRoles(skillName: string, roles: UserRole[]): Promise<ResourceRolesResponse> {
   const req: ResourceRolesUpdate = { roles };
-  const res = await client.put(`/api/rbac/skills/${skillName}/roles`, req);
+  const res = await client.put(`/api/rbac/skills/${encodeURIComponent(skillName)}/roles`, req);
   return res.data;
 }
 
 export async function updateMCPServerRoles(serverName: string, roles: UserRole[]): Promise<ResourceRolesResponse> {
   const req: ResourceRolesUpdate = { roles };
-  const res = await client.put(`/api/rbac/mcp-servers/${serverName}/roles`, req);
+  const res = await client.put(`/api/rbac/mcp-servers/${encodeURIComponent(serverName)}/roles`, req);
   return res.data;
 }

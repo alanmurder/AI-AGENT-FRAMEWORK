@@ -23,6 +23,7 @@ class ExpertAgentValidator:
         skill_map = {skill.name: skill for skill in all_skills or []}
         valid = []
         rejected = []
+        unknown = []
         for skill_name in skills:
             skill_obj = skill_map.get(skill_name)
             if skill_obj is None and all_skills is None:
@@ -31,12 +32,14 @@ class ExpertAgentValidator:
                 if all_skills is None:
                     valid.append(skill_name)
                 else:
-                    rejected.append(skill_name)
+                    unknown.append(skill_name)
                 continue
             if role_allows_skill(role_enum, skill_obj):
                 valid.append(skill_name)
             else:
                 rejected.append(skill_name)
+        if unknown:
+            raise ValueError(f"Unknown skill: {', '.join(unknown)}")
         if rejected:
             from structlog import get_logger
             get_logger().warning("skill_privilege_escalation_blocked", role=role, rejected=rejected)

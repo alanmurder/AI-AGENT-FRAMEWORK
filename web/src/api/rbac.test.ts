@@ -60,6 +60,17 @@ describe('rbac api', () => {
     });
   });
 
+  it('encodes skill names when updating skill roles', async () => {
+    const data = { name: 'folder/skill', roles: ['admin'] };
+    mockedClient.put.mockResolvedValueOnce({ data });
+
+    await updateSkillRoles('folder/skill', ['admin']);
+
+    expect(mockedClient.put).toHaveBeenCalledWith('/api/rbac/skills/folder%2Fskill/roles', {
+      roles: ['admin'],
+    });
+  });
+
   it('updates MCP server roles', async () => {
     const data = { name: 'filesystem', roles: ['operator'] };
     mockedClient.put.mockResolvedValueOnce({ data });
@@ -67,6 +78,17 @@ describe('rbac api', () => {
     await expect(updateMCPServerRoles('filesystem', ['operator'])).resolves.toEqual(data);
 
     expect(mockedClient.put).toHaveBeenCalledWith('/api/rbac/mcp-servers/filesystem/roles', {
+      roles: ['operator'],
+    });
+  });
+
+  it('encodes MCP server names when updating server roles', async () => {
+    const data = { name: 'filesystem/prod', roles: ['operator'] };
+    mockedClient.put.mockResolvedValueOnce({ data });
+
+    await updateMCPServerRoles('filesystem/prod', ['operator']);
+
+    expect(mockedClient.put).toHaveBeenCalledWith('/api/rbac/mcp-servers/filesystem%2Fprod/roles', {
       roles: ['operator'],
     });
   });

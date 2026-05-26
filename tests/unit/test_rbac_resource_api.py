@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 
 from harness.mcp.types import MCPServerConfig
 from harness.security import rbac
-from harness.skill.types import SkillAccess, SkillCategory, SkillInfo
+from harness.skill.types import SkillAccess, SkillCategory, SkillInfo, SkillManifest
 from runtime.context_schema import UserContext, UserRole
 
 
@@ -151,7 +151,8 @@ def test_put_skill_roles_updates_yaml(rbac_api):
     assert response.status_code == 200
     assert response.json() == {"name": "database_query", "roles": ["manager", "viewer"]}
     roles = _load(rbac_api.path)["rbac"]["roles"]
-    assert roles["admin"]["skills"] == ["file_manager"]
+    assert roles["admin"]["skills"] == ["*"]
+    assert roles["admin"]["skills_denied"] == ["database_query"]
     assert roles["manager"]["skills"] == ["database_query"]
     assert roles["operator"]["skills"] == ["file_manager"]
     assert roles["viewer"]["skills"] == ["database_query"]
@@ -224,6 +225,55 @@ def test_role_skills_endpoint_uses_exact_rbac_skill_allow_list(rbac_api):
         "file_manager": True,
         "database_query": False,
     }
+
+
+def test_list_skills_requires_authentication(monkeypatch):
+    from runtime import models
+
+    monkeypatch.setattr(
+        models,
+        "create_mini_model",
+        lambda config: SimpleNamespace(),
+    )
+
+    from gateway import server
+
+    client = TestClient(server.app)
+
+    assert client.get("/api/skills").status_code == 401
+
+
+def test_list_skills_filters_by_authenticated_role(rbac_api, monkeypatch):
+    from gateway import server
+
+    monkeypatch.setattr(
+        server,
+        "authenticate_optional",
+        lambda authorization=None: UserContext(user_id="operator", role=UserRole.OPERATOR),
+    )
+
+    class FakeSkillManager:
+        def list_skills_for_role(self, role):
+            assert role == UserRole.OPERATOR
+            return [rbac_api.skills[0]]
+
+    monkeypatch.setattr(server, "skill_manager", FakeSkillManager())
+
+    response = rbac_api.client.get("/api/skills", headers={"Authorization": "Bearer token"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["skills"] == [
+        {
+            "name": "file_manager",
+            "description": "file_manager skill",
+            "category": "data_analysis",
+            "access": "production",
+            "version": "1.0.0",
+            "location": "skills/file_manager",
+        }
+    ]
+    assert SkillManifest(rbac_api.skills[:1]).to_text() == payload["manifest"]
 
 
 def test_rbac_resource_endpoints_require_admin(monkeypatch):

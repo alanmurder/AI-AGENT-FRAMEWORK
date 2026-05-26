@@ -30,7 +30,15 @@ export default function SkillManager() {
     });
   }, [dirtySkills, store.rbacResources]);
 
-  const getSkillRoles = (skillName: string) => draftRoles[skillName] || [];
+  const getSkillResource = (skillName: string) => (
+    store.rbacResources?.skills.find((skill) => skill.name === skillName)
+  );
+
+  const getSkillRoles = (skillName: string) => (
+    draftRoles[skillName]
+    || getSkillResource(skillName)?.roles
+    || []
+  );
 
   const handleSkillRolesChange = (skillName: string, roles: UserRole[]) => {
     setDraftRoles((current) => ({ ...current, [skillName]: roles }));
@@ -38,7 +46,7 @@ export default function SkillManager() {
   };
 
   const handleSaveRoles = async (skillName: string) => {
-    if (!store.rbacResources) {
+    if (!getSkillResource(skillName)) {
       return;
     }
     setLoading(`roles:${skillName}`);
@@ -85,6 +93,7 @@ export default function SkillManager() {
     try {
       const res = await importSkillZip(file);
       await store.loadSkills();
+      await store.loadRbacResources();
       const skipped = res.skipped.length ? `，跳过 ${res.skipped.length} 个` : '';
       message.success(`已导入 ${res.imported.length} 个 Skill${skipped}`);
     } catch {
@@ -123,16 +132,17 @@ export default function SkillManager() {
                 options={store.rbacResources?.roles || []}
                 value={getSkillRoles(skill.name)}
                 onChange={(roles) => handleSkillRolesChange(skill.name, roles as UserRole[])}
-                disabled={!store.rbacResources}
+                disabled={!getSkillResource(skill.name)}
                 style={{ marginBottom: 8 }}
               />
               <Space size="small">
                 <Button size="small" onClick={() => handleOptimize(skill.name)}>GEPA优化</Button>
                 <Button
                   size="small"
+                  aria-label="save skill roles"
                   loading={loading === `roles:${skill.name}`}
                   onClick={() => handleSaveRoles(skill.name)}
-                  disabled={!store.rbacResources}
+                  disabled={!getSkillResource(skill.name)}
                 >
                   保存角色权限
                 </Button>
