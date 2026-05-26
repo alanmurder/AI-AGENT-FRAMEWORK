@@ -944,7 +944,7 @@ async def list_rbac_resources(authorization: str = Header(default=None)):
     }
 
 
-@app.put("/api/rbac/skills/{skill_name}/roles")
+@app.put("/api/rbac/skills/{skill_name:path}/roles")
 async def update_skill_roles(
     skill_name: str,
     req: ResourceRolesRequest,
@@ -971,7 +971,7 @@ async def update_skill_roles(
     }
 
 
-@app.put("/api/rbac/mcp-servers/{server_name}/roles")
+@app.put("/api/rbac/mcp-servers/{server_name:path}/roles")
 async def update_mcp_server_roles(
     server_name: str,
     req: ResourceRolesRequest,

@@ -34,6 +34,13 @@ export default function SkillManager() {
     store.rbacResources?.skills.find((skill) => skill.name === skillName)
   );
 
+  const permissionSkills = store.rbacResources?.skills.map((skill) => ({
+    name: skill.name,
+    description: skill.description,
+    category: store.skills.find((item) => item.name === skill.name)?.category || '',
+    access: skill.access,
+  })) || store.skills;
+
   const getSkillRoles = (skillName: string) => (
     draftRoles[skillName]
     || getSkillResource(skillName)?.roles
@@ -122,7 +129,7 @@ export default function SkillManager() {
       {loading && !loading.startsWith('roles:') && <Spin tip="处理中..." />}
       <List
         grid={{ gutter: 16, column: 3 }}
-        dataSource={store.skills}
+        dataSource={permissionSkills}
         renderItem={(skill) => (
           <List.Item>
             <Card title={skill.name} size="small">

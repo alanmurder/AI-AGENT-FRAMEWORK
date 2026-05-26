@@ -167,6 +167,26 @@ def test_put_skill_roles_rejects_unknown_skill(rbac_api):
     assert response.status_code == 404
 
 
+def test_put_skill_roles_accepts_encoded_slash_skill_name(rbac_api, monkeypatch):
+    folder_skill = _skill("folder/skill", SkillAccess.PRODUCTION)
+
+    from gateway import server
+
+    monkeypatch.setattr(
+        server,
+        "skill_manager",
+        SimpleNamespace(list_skills=lambda: [*rbac_api.skills, folder_skill]),
+    )
+
+    response = rbac_api.client.put(
+        "/api/rbac/skills/folder%2Fskill/roles",
+        json={"roles": ["admin"]},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"name": "folder/skill", "roles": ["admin"]}
+
+
 def test_put_skill_roles_rejects_invalid_role(rbac_api):
     response = rbac_api.client.put(
         "/api/rbac/skills/file_manager/roles",
@@ -202,6 +222,32 @@ def test_put_mcp_server_roles_rejects_unknown_server(rbac_api):
     )
 
     assert response.status_code == 404
+
+
+def test_put_mcp_server_roles_accepts_encoded_slash_server_name(rbac_api, monkeypatch):
+    from gateway import server
+
+    servers = {
+        "filesystem": MCPServerConfig(name="filesystem", enabled=True),
+        "github": MCPServerConfig(name="github", enabled=False),
+        "folder/server": MCPServerConfig(name="folder/server", enabled=True),
+    }
+    monkeypatch.setattr(
+        server,
+        "mcp_manager",
+        SimpleNamespace(
+            list_servers=lambda: list(servers.values()),
+            get_server=lambda name: servers.get(name),
+        ),
+    )
+
+    response = rbac_api.client.put(
+        "/api/rbac/mcp-servers/folder%2Fserver/roles",
+        json={"roles": ["viewer"]},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"name": "folder/server", "roles": ["admin", "viewer"]}
 
 
 def test_put_mcp_server_roles_rejects_invalid_role(rbac_api):

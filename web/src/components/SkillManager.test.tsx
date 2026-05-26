@@ -83,9 +83,28 @@ describe('SkillManager role permissions', () => {
 
     render(<SkillManager />);
 
-    expect(await screen.findByText('new_skill')).toBeTruthy();
+    expect(screen.queryByText('new_skill')).toBeNull();
+    expect(screen.getAllByRole('button', { name: 'save skill roles' })).toHaveLength(1);
+  });
+
+  test('renders permission rows from RBAC resources even when skills are role filtered', async () => {
+    useAdminStore.setState({
+      skills: [{ name: 'file_manager', description: 'Files', category: 'file_manager', access: 'report' }],
+      rbacResources: {
+        roles: ['admin', 'manager', 'operator', 'viewer'],
+        skills: [
+          { name: 'file_manager', description: 'Files', access: 'report', roles: ['admin'] },
+          { name: 'hidden_skill', description: 'Hidden', access: 'enterprise', roles: ['operator'] },
+        ],
+        mcp_servers: [],
+      },
+    });
+
+    render(<SkillManager />);
+
+    expect(await screen.findByText('hidden_skill')).toBeTruthy();
     const buttons = screen.getAllByRole('button', { name: 'save skill roles' }) as HTMLButtonElement[];
-    expect(buttons[1].disabled).toBe(true);
+    expect(buttons[1].disabled).toBe(false);
   });
 
   test('refreshes RBAC resources after importing a skill zip', async () => {
