@@ -4,20 +4,24 @@ import { useAdminStore } from '../store/adminStore';
 import { useEffect, useState } from 'react';
 import { verifySkill, optimizeSkill, triggerAutoEvolution, importSkillZip } from '../api/admin';
 import type { UserRole } from '../types/api';
+import { useAuth } from '../hooks/useAuth';
 
 export default function SkillManager() {
   const store = useAdminStore();
+  const { isAdmin } = useAuth();
   const [loading, setLoading] = useState<string>('');
   const [draftRoles, setDraftRoles] = useState<Record<string, UserRole[]>>({});
   const [dirtySkills, setDirtySkills] = useState<Record<string, boolean>>({});
 
   useEffect(() => {
     store.loadSkills();
-    store.loadRbacResources();
-  }, []);
+    if (isAdmin) {
+      store.loadRbacResources();
+    }
+  }, [isAdmin]);
 
   useEffect(() => {
-    if (!store.rbacResources) return;
+    if (!isAdmin || !store.rbacResources) return;
     const { rbacResources } = store;
     setDraftRoles((current) => {
       const next = { ...current };
@@ -28,18 +32,18 @@ export default function SkillManager() {
       }
       return next;
     });
-  }, [dirtySkills, store.rbacResources]);
+  }, [dirtySkills, isAdmin, store.rbacResources]);
 
   const getSkillResource = (skillName: string) => (
-    store.rbacResources?.skills.find((skill) => skill.name === skillName)
+    isAdmin ? store.rbacResources?.skills.find((skill) => skill.name === skillName) : undefined
   );
 
-  const permissionSkills = store.rbacResources?.skills.map((skill) => ({
+  const permissionSkills = isAdmin && store.rbacResources ? store.rbacResources.skills.map((skill) => ({
     name: skill.name,
     description: skill.description,
     category: store.skills.find((item) => item.name === skill.name)?.category || '',
     access: skill.access,
-  })) || store.skills;
+  })) : store.skills;
 
   const getSkillRoles = (skillName: string) => (
     draftRoles[skillName]
@@ -53,7 +57,7 @@ export default function SkillManager() {
   };
 
   const handleSaveRoles = async (skillName: string) => {
-    if (!getSkillResource(skillName)) {
+    if (!isAdmin || !getSkillResource(skillName)) {
       return;
     }
     setLoading(`roles:${skillName}`);
@@ -100,7 +104,9 @@ export default function SkillManager() {
     try {
       const res = await importSkillZip(file);
       await store.loadSkills();
-      await store.loadRbacResources();
+      if (isAdmin) {
+        await store.loadRbacResources();
+      }
       const skipped = res.skipped.length ? `，跳过 ${res.skipped.length} 个` : '';
       message.success(`已导入 ${res.imported.length} 个 Skill${skipped}`);
     } catch {
@@ -135,24 +141,28 @@ export default function SkillManager() {
             <Card title={skill.name} size="small">
               <p style={{ fontSize: 13, color: '#666' }}>{skill.description}</p>
               <p style={{ fontSize: 12, color: '#999' }}>类别: {skill.category} | 访问: {skill.access}</p>
-              <Checkbox.Group
-                options={store.rbacResources?.roles || []}
-                value={getSkillRoles(skill.name)}
-                onChange={(roles) => handleSkillRolesChange(skill.name, roles as UserRole[])}
-                disabled={!getSkillResource(skill.name)}
-                style={{ marginBottom: 8 }}
-              />
+              {isAdmin && (
+                <Checkbox.Group
+                  options={store.rbacResources?.roles || []}
+                  value={getSkillRoles(skill.name)}
+                  onChange={(roles) => handleSkillRolesChange(skill.name, roles as UserRole[])}
+                  disabled={!getSkillResource(skill.name)}
+                  style={{ marginBottom: 8 }}
+                />
+              )}
               <Space size="small">
                 <Button size="small" onClick={() => handleOptimize(skill.name)}>GEPA优化</Button>
-                <Button
-                  size="small"
-                  aria-label="save skill roles"
-                  loading={loading === `roles:${skill.name}`}
-                  onClick={() => handleSaveRoles(skill.name)}
-                  disabled={!getSkillResource(skill.name)}
-                >
-                  保存角色权限
-                </Button>
+                {isAdmin && (
+                  <Button
+                    size="small"
+                    aria-label="save skill roles"
+                    loading={loading === `roles:${skill.name}`}
+                    onClick={() => handleSaveRoles(skill.name)}
+                    disabled={!getSkillResource(skill.name)}
+                  >
+                    保存角色权限
+                  </Button>
+                )}
               </Space>
             </Card>
           </List.Item>

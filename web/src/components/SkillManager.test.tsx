@@ -2,6 +2,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import SkillManager from './SkillManager';
 import { useAdminStore } from '../store/adminStore';
+import { useAuthStore } from '../store/authStore';
 import * as adminApi from '../api/admin';
 
 vi.mock('../api/admin', () => ({
@@ -29,6 +30,7 @@ const loadSkills = vi.fn().mockResolvedValue(undefined);
 const loadRbacResources = vi.fn().mockResolvedValue(undefined);
 const updateSkillRoles = vi.fn().mockResolvedValue(undefined);
 const initialAdminState = useAdminStore.getState();
+const initialAuthState = useAuthStore.getState();
 
 describe('SkillManager role permissions', () => {
   beforeEach(() => {
@@ -44,11 +46,19 @@ describe('SkillManager role permissions', () => {
       loadRbacResources,
       updateSkillRoles,
     });
+    useAuthStore.setState({
+      userId: 'admin',
+      role: 'admin',
+      token: 'token',
+      agentId: '',
+      isAuthenticated: true,
+    });
   });
 
   afterEach(() => {
     cleanup();
     useAdminStore.setState(initialAdminState, true);
+    useAuthStore.setState(initialAuthState, true);
   });
 
   test('saves updated skill role permissions', async () => {
@@ -120,5 +130,22 @@ describe('SkillManager role permissions', () => {
       expect(adminApi.importSkillZip).toHaveBeenCalledWith(file);
       expect(loadRbacResources).toHaveBeenCalledTimes(2);
     });
+  });
+
+  test('does not load or render role permission controls for managers', async () => {
+    useAuthStore.setState({
+      userId: 'manager',
+      role: 'manager',
+      token: 'token',
+      agentId: '',
+      isAuthenticated: true,
+    });
+    useAdminStore.setState({ rbacResources: null });
+
+    render(<SkillManager />);
+
+    expect(await screen.findByText('file_manager')).toBeTruthy();
+    expect(loadRbacResources).not.toHaveBeenCalled();
+    expect(screen.queryByRole('button', { name: 'save skill roles' })).toBeNull();
   });
 });

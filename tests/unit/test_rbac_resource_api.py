@@ -317,6 +317,42 @@ def test_role_mcp_tools_endpoint_honors_denies_under_wildcard(rbac_api, monkeypa
     }
 
 
+def test_role_resource_endpoints_filter_denied_resources_for_non_admin(rbac_api, monkeypatch):
+    from gateway import server
+
+    monkeypatch.setattr(
+        server,
+        "authenticate_optional",
+        lambda authorization=None: UserContext(user_id="operator", role=UserRole.OPERATOR),
+    )
+    monkeypatch.setattr(
+        server,
+        "mcp_manager",
+        SimpleNamespace(
+            get_all_tools_info=lambda: [
+                MCPToolInfo("filesystem", "read", "Read files"),
+                MCPToolInfo("github", "search", "Search repositories"),
+            ],
+        ),
+    )
+
+    skills_response = rbac_api.client.get(
+        "/api/roles/operator/skills",
+        headers={"Authorization": "Bearer token"},
+    )
+    tools_response = rbac_api.client.get(
+        "/api/roles/operator/mcp-tools",
+        headers={"Authorization": "Bearer token"},
+    )
+
+    assert skills_response.status_code == 200
+    assert [skill["name"] for skill in skills_response.json()["skills"]] == ["file_manager"]
+    assert all(skill["allowed"] for skill in skills_response.json()["skills"])
+    assert tools_response.status_code == 200
+    assert [tool["name"] for tool in tools_response.json()["mcp_tools"]] == ["filesystem:read"]
+    assert all(tool["allowed"] for tool in tools_response.json()["mcp_tools"])
+
+
 def test_mcp_server_management_requires_admin(monkeypatch):
     from runtime import models
 
@@ -332,6 +368,60 @@ def test_mcp_server_management_requires_admin(monkeypatch):
 
     assert client.get("/api/mcp/servers").status_code == 401
     assert client.get("/api/mcp/servers/filesystem").status_code == 401
+
+
+def test_list_mcp_tools_requires_authentication(rbac_api, monkeypatch):
+    from gateway import server
+
+    monkeypatch.setattr(server, "authenticate_optional", lambda authorization=None: None)
+
+    response = rbac_api.client.get("/api/mcp/tools")
+
+    assert response.status_code == 401
+
+
+def test_optimize_skill_rejects_manager_denied_by_skill_rbac(rbac_api, monkeypatch):
+    from gateway import server
+
+    def fail_load(skill_name):
+        pytest.fail("Denied skill content should not be loaded")
+
+    class FakeOptimizer:
+        def __init__(self, runner, config):
+            pass
+
+        def optimize_skill(self, skill_name, skill_content, user_ctx):
+            return SimpleNamespace(
+                optimized=False,
+                original_score=1.0,
+                best_candidate=None,
+                candidates_count=0,
+            )
+
+    monkeypatch.setattr(
+        server,
+        "authenticate_user",
+        lambda api_key=None, token=None: UserContext(user_id="manager", role=UserRole.MANAGER),
+    )
+    monkeypatch.setattr(
+        server,
+        "skill_manager",
+        SimpleNamespace(
+            list_skills=lambda: rbac_api.skills,
+            get_skill=lambda name: next((skill for skill in rbac_api.skills if skill.name == name), None),
+            load_skill_content=fail_load,
+        ),
+    )
+    monkeypatch.setattr(server, "_make_subagent_runner", lambda: SimpleNamespace())
+    monkeypatch.setattr(server, "GEPAOptimizer", FakeOptimizer)
+
+    response = rbac_api.client.post(
+        "/api/skills/optimize/file_manager",
+        json={"user_id": "manager"},
+        headers={"Authorization": "Bearer token"},
+    )
+
+    assert response.status_code == 403
 
 
 def test_list_skills_requires_authentication(monkeypatch):

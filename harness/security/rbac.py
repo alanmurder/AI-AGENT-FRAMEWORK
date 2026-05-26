@@ -292,7 +292,7 @@ def set_mcp_server_roles(
         current_entries = role_data.get("mcp_tools", []) or []
         current_denied = [
             entry for entry in role_data.get("mcp_tools_denied", []) or []
-            if entry != server_wildcard and not entry.startswith(server_prefix)
+            if entry != server_wildcard
         ]
         next_entries = [
             entry

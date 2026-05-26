@@ -1007,7 +1007,7 @@ async def list_mcp_tools(role: str = "", authorization: str = Header(default=Non
     Requires auth. Returns only tools the caller's role is allowed to use."""
     user_ctx = authenticate_optional(authorization)
     if user_ctx is None:
-        return {"tools": []}
+        raise HTTPException(status_code=401, detail="Authentication required")
 
     from harness.security.rbac import get_role_mcp_tool_access, mcp_tool_allowed
     allowed = get_role_mcp_tool_access().get(user_ctx.role, [])
@@ -1300,13 +1300,17 @@ async def get_role_skills(role: str, authorization: str = Header(default=None)):
     from harness.security.rbac import role_allows_skill
 
     skill_list = skill_manager.list_skills() if hasattr(skill_manager, 'list_skills') else []
+    is_admin = user_ctx.role == UserRole.ADMIN
     result = []
     for skill in skill_list:
+        allowed = role_allows_skill(target_role, skill)
+        if not is_admin and not allowed:
+            continue
         result.append({
             "name": skill.name if hasattr(skill, 'name') else str(skill),
             "description": skill.description if hasattr(skill, 'description') else "",
             "access": skill.access.value if hasattr(skill, 'access') else "unknown",
-            "allowed": role_allows_skill(target_role, skill),
+            "allowed": allowed,
         })
     return {"role": target_role.value, "skill_access": ExpertAgentValidator.get_role_skill_level(target_role.value), "skills": result}
 
@@ -1333,14 +1337,18 @@ async def get_role_mcp_tools(role: str, authorization: str = Header(default=None
     allowed = ExpertAgentValidator.get_role_mcp_tools(target_role.value)
     all_tools = mcp_manager.get_all_tools_info()
 
+    is_admin = user_ctx.role == UserRole.ADMIN
     result = []
     for tool in all_tools:
+        allowed_tool = mcp_tool_allowed(tool.full_name, allowed)
+        if not is_admin and not allowed_tool:
+            continue
         result.append({
             "name": tool.full_name,
             "server_name": tool.server_name,
             "tool_name": tool.tool_name,
             "description": tool.description,
-            "allowed": mcp_tool_allowed(tool.full_name, allowed),
+            "allowed": allowed_tool,
         })
     return {"role": target_role.value, "mcp_tools": result}
 
@@ -1398,6 +1406,23 @@ async def optimize_skill(skill_name: str, req: SkillOptimizeRequest, authorizati
     user_ctx = authenticate_user(api_key=api_key, token=token)
     if user_ctx.role not in (UserRole.ADMIN, UserRole.MANAGER):
         raise HTTPException(status_code=403, detail="Only admin/manager can trigger skill optimization")
+
+    skill_info = skill_manager.get_skill(skill_name) if hasattr(skill_manager, "get_skill") else None
+    if skill_info is None and hasattr(skill_manager, "list_skills"):
+        skill_info = next(
+            (
+                skill
+                for skill in skill_manager.list_skills()
+                if getattr(skill, "name", str(skill)) == skill_name
+            ),
+            None,
+        )
+    if skill_info is None:
+        raise HTTPException(status_code=404, detail=f"Skill '{skill_name}' not found")
+
+    from harness.security.rbac import role_allows_skill
+    if not role_allows_skill(user_ctx.role, skill_info):
+        raise HTTPException(status_code=403, detail=f"Role '{user_ctx.role.value}' cannot optimize skill '{skill_name}'")
 
     skill_content = skill_manager.load_skill_content(skill_name)
     if not skill_content:

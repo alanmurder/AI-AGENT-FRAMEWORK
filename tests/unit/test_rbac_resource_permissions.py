@@ -280,6 +280,31 @@ def test_set_mcp_server_roles_replaces_only_target_server_entries(
     assert rbac.mcp_tool_allowed("future:query", rbac.get_role_mcp_tool_access()[UserRole.ADMIN]) is True
 
 
+def test_set_mcp_server_roles_preserves_exact_denies_under_wildcard(
+    tmp_path, monkeypatch
+):
+    path = _configure(
+        monkeypatch,
+        tmp_path,
+        {
+            "rbac": {
+                "roles": {
+                    "admin": {
+                        "mcp_tools": ["*"],
+                        "mcp_tools_denied": ["database:drop"],
+                    },
+                }
+            }
+        },
+    )
+
+    rbac.set_mcp_server_roles("database", [UserRole.ADMIN])
+
+    roles = _load(path)["rbac"]["roles"]
+    assert roles["admin"]["mcp_tools"] == ["*"]
+    assert roles["admin"]["mcp_tools_denied"] == ["database:drop"]
+
+
 def test_expert_validator_honors_mcp_denies_under_wildcard(tmp_path, monkeypatch):
     _configure(
         monkeypatch,
