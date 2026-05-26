@@ -147,5 +147,6 @@ describe('SkillManager role permissions', () => {
     expect(await screen.findByText('file_manager')).toBeTruthy();
     expect(loadRbacResources).not.toHaveBeenCalled();
     expect(screen.queryByRole('button', { name: 'save skill roles' })).toBeNull();
+    expect(screen.queryByText('上传 Skill ZIP')).toBeNull();
   });
 });

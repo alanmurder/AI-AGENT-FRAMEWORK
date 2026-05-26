@@ -106,9 +106,9 @@ class StandardMessage:
 | `/api/mcp/servers/{name}` | PUT/DELETE | admin | 单个 MCP 服务端 |
 | `/api/mcp/servers/{name}/connect` | POST | admin | 连接 MCP 服务端 |
 | `/api/mcp/servers/{name}/disconnect` | POST | admin | 断开 MCP 服务端 |
-| `/api/mcp/tools` | GET | 无 | 已发现 MCP 工具 |
-| `/api/roles/{role}/skills` | GET | 无 | 角色可用 Skill |
-| `/api/roles/{role}/mcp-tools` | GET | 无 | 角色可用 MCP 工具 |
+| `/api/mcp/tools` | GET | JWT/API Key | 已发现 MCP 工具 |
+| `/api/roles/{role}/skills` | GET | JWT/API Key | 角色可用 Skill |
+| `/api/roles/{role}/mcp-tools` | GET | JWT/API Key | 角色可用 MCP 工具 |
 | `/api/memory/{user_id}` | GET | JWT | 读取记忆文件 |
 | `/api/sessions/{user_id}` | GET | JWT | 会话列表 |
 | `/api/sessions/{user_id}/{session_id}` | GET | JWT | 会话消息回放 |

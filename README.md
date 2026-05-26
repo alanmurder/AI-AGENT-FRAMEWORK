@@ -644,9 +644,9 @@ description: 处理生产相关的综合问题
 | `/api/mcp/servers/{name}` | PUT/DELETE | admin | 单个 MCP 服务端 |
 | `/api/mcp/servers/{name}/connect` | POST | admin | 连接 MCP 服务端 |
 | `/api/mcp/servers/{name}/disconnect` | POST | admin | 断开 MCP 服务端 |
-| `/api/mcp/tools` | GET | 无 | 已发现 MCP 工具（支持 ?role=） |
-| `/api/roles/{role}/skills` | GET | 无 | 角色可用 Skill 列表 |
-| `/api/roles/{role}/mcp-tools` | GET | 无 | 角色可用 MCP 工具列表 |
+| `/api/mcp/tools` | GET | JWT/API Key | 已发现 MCP 工具（支持 ?role=） |
+| `/api/roles/{role}/skills` | GET | JWT/API Key | 角色可用 Skill 列表 |
+| `/api/roles/{role}/mcp-tools` | GET | JWT/API Key | 角色可用 MCP 工具列表 |
 | `/api/skills/verify` | POST | admin/manager | 三 Agent Skill 验证 |
 | `/api/skills/optimize/{name}` | POST | admin/manager | GEPA Skill 优化 |
 | `/api/evolution/auto` | POST | JWT | 触发自主进化 |

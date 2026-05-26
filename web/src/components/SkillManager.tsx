@@ -119,16 +119,18 @@ export default function SkillManager() {
   return (
     <div>
       <Space style={{ marginBottom: 16 }}>
-        <Upload
-          accept=".zip"
-          showUploadList={false}
-          beforeUpload={(file) => {
-            void handleImportZip(file as File);
-            return false;
-          }}
-        >
-          <Button icon={<UploadOutlined />} loading={loading === 'import'}>上传 Skill ZIP</Button>
-        </Upload>
+        {isAdmin && (
+          <Upload
+            accept=".zip"
+            showUploadList={false}
+            beforeUpload={(file) => {
+              void handleImportZip(file as File);
+              return false;
+            }}
+          >
+            <Button icon={<UploadOutlined />} loading={loading === 'import'}>上传 Skill ZIP</Button>
+          </Upload>
+        )}
         <Button type="primary" loading={loading === 'verify'} onClick={handleVerify}>触发三Agent验证</Button>
         <Button loading={loading === 'evolution'} onClick={handleAutoEvolution}>触发自主进化</Button>
       </Space>
