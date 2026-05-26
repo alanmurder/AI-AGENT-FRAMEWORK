@@ -1,5 +1,5 @@
 import client from './client';
-import type { MCPServerConfig, MCPToolInfo, MCPServerDetail } from '../types/api';
+import type { MCPServerConfig, MCPToolInfo, MCPServerDetail, MCPImportResult } from '../types/api';
 
 export async function listMCPServers(): Promise<{ servers: MCPServerConfig[] }> {
   const res = await client.get('/api/mcp/servers');
@@ -13,6 +13,13 @@ export async function getMCPServer(name: string): Promise<MCPServerDetail> {
 
 export async function createMCPServer(req: MCPServerConfig): Promise<{ message: string; name: string }> {
   const res = await client.post('/api/mcp/servers', req);
+  return res.data;
+}
+
+export async function importMCPServers(file: File, overwrite = true): Promise<MCPImportResult> {
+  const form = new FormData();
+  form.append('file', file);
+  const res = await client.post('/api/mcp/servers/import', form, { params: { overwrite } });
   return res.data;
 }
 

@@ -1,13 +1,6 @@
 import { create } from 'zustand';
-import type { ApprovalItem, CronTaskItem, BackgroundTaskItem, PluginInfo } from '../types/api';
+import type { ApprovalItem, CronTaskItem, BackgroundTaskItem, PluginInfo, SkillInfo } from '../types/api';
 import * as adminApi from '../api/admin';
-
-interface SkillInfo {
-  name: string;
-  description: string;
-  category: string;
-  access: string;
-}
 
 interface AdminState {
   pendingApprovals: ApprovalItem[];
@@ -71,12 +64,14 @@ export const useAdminStore = create<AdminState>((set) => ({
 
   loadSkills: async () => {
     const res = await adminApi.listSkills();
-    const skills: SkillInfo[] = Object.entries(res.manifest || {}).map(([name, info]: [string, any]) => ({
-      name,
-      description: info?.description || '',
-      category: info?.category || '',
-      access: info?.access || '',
-    }));
+    const skills: SkillInfo[] = Array.isArray(res.skills)
+      ? res.skills
+      : Object.entries(typeof res.manifest === 'object' ? res.manifest : {}).map(([name, info]: [string, any]) => ({
+        name,
+        description: info?.description || '',
+        category: info?.category || '',
+        access: info?.access || '',
+      }));
     set({ skills });
   },
 

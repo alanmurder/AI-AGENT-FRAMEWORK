@@ -1,8 +1,8 @@
 import { useState, useEffect, useCallback } from 'react';
 import {
-  Button, Card, Col, Form, Input, message, Modal, Row, Select, Space, Spin, Switch, Tag, Typography,
+  Button, Card, Col, Form, Input, message, Modal, Row, Select, Space, Spin, Switch, Tag, Typography, Upload,
 } from 'antd';
-import { PlusOutlined, DeleteOutlined, LinkOutlined, DisconnectOutlined } from '@ant-design/icons';
+import { PlusOutlined, DeleteOutlined, LinkOutlined, DisconnectOutlined, UploadOutlined } from '@ant-design/icons';
 import { useMCPStore } from '../store/mcpStore';
 import * as mcpApi from '../api/mcp';
 import type { MCPServerConfig, MCPToolInfo } from '../types/api';
@@ -26,6 +26,7 @@ export default function MCPServerManager() {
   const [serverTools, setServerTools] = useState<MCPToolInfo[]>([]);
   const [saving, setSaving] = useState(false);
   const [connecting, setConnecting] = useState(false);
+  const [importing, setImporting] = useState(false);
   const [isNew, setIsNew] = useState(false);
 
   useEffect(() => {
@@ -50,6 +51,24 @@ export default function MCPServerManager() {
     setFormData(EMPTY_FORM);
     setServerTools([]);
   }, []);
+
+  const handleImportConfig = useCallback(async (file: File) => {
+    setImporting(true);
+    try {
+      const result = await mcpApi.importMCPServers(file);
+      await store.loadServers();
+      const skipped = result.skipped.length ? `，跳过 ${result.skipped.length} 个` : '';
+      if (result.errors.length) {
+        message.warning(`已导入 ${result.imported.length} 个 MCP 配置，${result.errors.length} 个存在连接错误${skipped}`);
+      } else {
+        message.success(`已导入 ${result.imported.length} 个 MCP 配置${skipped}`);
+      }
+    } catch {
+      message.error('MCP 配置导入失败');
+    } finally {
+      setImporting(false);
+    }
+  }, [store]);
 
   const handleSave = useCallback(async () => {
     if (!formData.name) {
@@ -126,7 +145,21 @@ export default function MCPServerManager() {
         <Card
           title="MCP 服务器"
           size="small"
-          extra={<Button type="primary" size="small" icon={<PlusOutlined />} onClick={newServer}>添加</Button>}
+          extra={(
+            <Space>
+              <Upload
+                accept=".json,.yaml,.yml"
+                showUploadList={false}
+                beforeUpload={(file) => {
+                  void handleImportConfig(file as File);
+                  return false;
+                }}
+              >
+                <Button size="small" icon={<UploadOutlined />} loading={importing}>导入</Button>
+              </Upload>
+              <Button type="primary" size="small" icon={<PlusOutlined />} onClick={newServer}>添加</Button>
+            </Space>
+          )}
         >
           <Spin spinning={store.loading}>
             <div style={{ maxHeight: 500, overflow: 'auto' }}>

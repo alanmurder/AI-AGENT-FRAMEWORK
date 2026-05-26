@@ -9,6 +9,8 @@ import structlog.dev
 from pathlib import Path
 import time as _time
 from contextlib import asynccontextmanager
+from email.parser import BytesParser
+from email.policy import default as email_default_policy
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Depends, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -151,6 +153,41 @@ def require_role_or_above(min_role: UserRole) -> callable:
             raise HTTPException(status_code=403, detail=f"Requires {min_role.value} role or higher")
         return user_ctx
     return _check
+
+
+async def read_uploaded_file(
+    request: Request,
+    fallback_filename: str,
+    max_bytes: int = 20 * 1024 * 1024,
+) -> tuple[str, bytes]:
+    """Read a small uploaded file without requiring python-multipart at app import time."""
+    body = await request.body()
+    if len(body) > max_bytes:
+        raise HTTPException(status_code=413, detail=f"Upload is too large; max {max_bytes} bytes")
+
+    content_type = request.headers.get("content-type", "")
+    if content_type.startswith("multipart/form-data"):
+        raw_message = (
+            f"Content-Type: {content_type}\r\nMIME-Version: 1.0\r\n\r\n".encode()
+            + body
+        )
+        message = BytesParser(policy=email_default_policy).parsebytes(raw_message)
+        if not message.is_multipart():
+            raise HTTPException(status_code=400, detail="Invalid multipart upload")
+        for part in message.iter_parts():
+            if part.get_content_disposition() != "form-data":
+                continue
+            if part.get_param("name", header="content-disposition") != "file":
+                continue
+            filename = part.get_filename() or fallback_filename
+            payload = part.get_payload(decode=True)
+            if payload is None:
+                payload = str(part.get_content()).encode("utf-8")
+            return filename, payload
+        raise HTTPException(status_code=400, detail="Multipart upload must include a 'file' field")
+
+    filename = request.headers.get("x-filename") or fallback_filename
+    return filename, body
 
 
 @asynccontextmanager
@@ -298,7 +335,58 @@ async def register_user(req: RegisterRequest, authorization: str = Header(defaul
 @app.get("/api/skills")
 async def list_skills():
     """List available skills."""
-    return {"manifest": skill_manager.generate_manifest()}
+    manifest = skill_manager.get_manifest()
+    return {
+        "manifest": manifest.to_text(),
+        "skills": [
+            {
+                "name": skill.name,
+                "description": skill.description,
+                "category": skill.category.value,
+                "access": skill.access.value,
+                "version": skill.version,
+                "location": skill.location,
+            }
+            for skill in manifest.skills
+        ],
+    }
+
+
+@app.post("/api/skills/import-zip")
+async def import_skill_zip_endpoint(
+    request: Request,
+    overwrite: bool = True,
+    authorization: str = Header(default=None),
+):
+    """Import one or more Skill packages from a zip upload (admin only)."""
+    user_ctx = require_admin(authorization)
+    filename, content = await read_uploaded_file(request, fallback_filename="skills.zip")
+    if not filename.lower().endswith(".zip"):
+        raise HTTPException(status_code=400, detail="Skill import requires a .zip file")
+
+    from zipfile import BadZipFile
+
+    from harness.skill.importer import SkillImportError, import_skill_zip
+
+    try:
+        result = import_skill_zip(
+            content,
+            Path(config.project_root) / "skills" / "extensions",
+            overwrite=overwrite,
+        )
+    except BadZipFile as exc:
+        raise HTTPException(status_code=400, detail="Invalid zip archive") from exc
+    except SkillImportError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    logger.info(
+        "skill_zip_imported",
+        user_id=user_ctx.user_id,
+        filename=filename,
+        imported=result.imported,
+        skipped=result.skipped,
+    )
+    return {"imported": result.imported, "skipped": result.skipped}
 
 
 @app.get("/api/memory/{user_id}")
@@ -703,6 +791,63 @@ async def create_mcp_server(req: MCPServerRequest, authorization: str = Header(d
     )
     await mcp_manager.add_server(cfg)
     return {"message": f"MCP server '{req.name}' created", "name": req.name}
+
+
+@app.post("/api/mcp/servers/import")
+async def import_mcp_servers(
+    request: Request,
+    overwrite: bool = True,
+    authorization: str = Header(default=None),
+):
+    """Import MCP server configurations from JSON/YAML upload (admin only)."""
+    user_ctx = require_admin(authorization)
+    filename, content = await read_uploaded_file(request, fallback_filename="mcp.yaml")
+    lower_name = filename.lower()
+    if not lower_name.endswith((".json", ".yaml", ".yml")):
+        raise HTTPException(status_code=400, detail="MCP import requires a .json, .yaml, or .yml file")
+
+    from harness.mcp.importer import MCPImportError, parse_mcp_server_configs
+
+    try:
+        server_configs = parse_mcp_server_configs(content, filename)
+    except MCPImportError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid MCP config: {exc}") from exc
+
+    imported: list[str] = []
+    skipped: list[str] = []
+    errors: list[dict[str, str]] = []
+    for server_config in server_configs:
+        existing = mcp_manager.get_server(server_config.name)
+        if existing and not overwrite:
+            skipped.append(server_config.name)
+            continue
+        if existing:
+            await mcp_manager.remove_server(server_config.name)
+        try:
+            await mcp_manager.add_server(server_config)
+            imported.append(server_config.name)
+        except Exception as exc:
+            if mcp_manager.get_server(server_config.name):
+                imported.append(server_config.name)
+            errors.append({"name": server_config.name, "error": str(exc)})
+            logger.warning(
+                "mcp_import_connect_failed",
+                user_id=user_ctx.user_id,
+                server=server_config.name,
+                exc_info=True,
+            )
+
+    logger.info(
+        "mcp_servers_imported",
+        user_id=user_ctx.user_id,
+        filename=filename,
+        imported=imported,
+        skipped=skipped,
+        errors=len(errors),
+    )
+    return {"imported": imported, "skipped": skipped, "errors": errors}
 
 
 @app.put("/api/mcp/servers/{name}")

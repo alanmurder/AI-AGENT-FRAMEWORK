@@ -91,6 +91,20 @@ export interface EvolutionAutoResult {
   suggested_skill_name: string;
 }
 
+export interface SkillInfo {
+  name: string;
+  description: string;
+  category: string;
+  access: string;
+  version?: string;
+  location?: string;
+}
+
+export interface SkillImportResult {
+  imported: string[];
+  skipped: string[];
+}
+
 export interface PluginInfo {
   name: string;
   description: string;
@@ -145,6 +159,12 @@ export interface MCPToolInfo {
 export interface MCPServerDetail {
   config: MCPServerConfig;
   tools: MCPToolInfo[];
+}
+
+export interface MCPImportResult {
+  imported: string[];
+  skipped: string[];
+  errors: { name: string; error: string }[];
 }
 
 // Expert agent CRUD types

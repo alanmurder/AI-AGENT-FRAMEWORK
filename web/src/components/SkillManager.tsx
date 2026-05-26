@@ -1,7 +1,8 @@
-import { Button, Card, message, Space, List, Spin } from 'antd';
+import { Button, Card, message, Space, List, Spin, Upload } from 'antd';
+import { UploadOutlined } from '@ant-design/icons';
 import { useAdminStore } from '../store/adminStore';
 import { useEffect, useState } from 'react';
-import { verifySkill, optimizeSkill, triggerAutoEvolution } from '../api/admin';
+import { verifySkill, optimizeSkill, triggerAutoEvolution, importSkillZip } from '../api/admin';
 
 export default function SkillManager() {
   const store = useAdminStore();
@@ -38,9 +39,33 @@ export default function SkillManager() {
     finally { setLoading(''); }
   };
 
+  const handleImportZip = async (file: File) => {
+    setLoading('import');
+    try {
+      const res = await importSkillZip(file);
+      await store.loadSkills();
+      const skipped = res.skipped.length ? `，跳过 ${res.skipped.length} 个` : '';
+      message.success(`已导入 ${res.imported.length} 个 Skill${skipped}`);
+    } catch {
+      message.error('Skill ZIP 导入失败');
+    } finally {
+      setLoading('');
+    }
+  };
+
   return (
     <div>
       <Space style={{ marginBottom: 16 }}>
+        <Upload
+          accept=".zip"
+          showUploadList={false}
+          beforeUpload={(file) => {
+            void handleImportZip(file as File);
+            return false;
+          }}
+        >
+          <Button icon={<UploadOutlined />} loading={loading === 'import'}>上传 Skill ZIP</Button>
+        </Upload>
         <Button type="primary" loading={loading === 'verify'} onClick={handleVerify}>触发三Agent验证</Button>
         <Button loading={loading === 'evolution'} onClick={handleAutoEvolution}>触发自主进化</Button>
       </Space>

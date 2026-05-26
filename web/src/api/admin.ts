@@ -10,6 +10,8 @@ import type {
   GEPAOptimizeResult,
   EvolutionAutoResult,
   PluginInfo,
+  SkillImportResult,
+  SkillInfo,
 } from '../types/api';
 
 export async function listPendingApprovals(): Promise<{ pending_approvals: ApprovalItem[] }> {
@@ -57,8 +59,15 @@ export async function submitBackgroundTask(req: BackgroundTaskCreate): Promise<B
   return res.data;
 }
 
-export async function listSkills(): Promise<{ manifest: Record<string, unknown> }> {
+export async function listSkills(): Promise<{ manifest: Record<string, unknown> | string; skills?: SkillInfo[] }> {
   const res = await client.get('/api/skills');
+  return res.data;
+}
+
+export async function importSkillZip(file: File, overwrite = true): Promise<SkillImportResult> {
+  const form = new FormData();
+  form.append('file', file);
+  const res = await client.post('/api/skills/import-zip', form, { params: { overwrite } });
   return res.data;
 }
 
