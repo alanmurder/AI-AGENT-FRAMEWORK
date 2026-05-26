@@ -26,8 +26,8 @@ Do something useful.""", encoding="utf-8")
     assert result.category.value == "file_manager"
 
 
-def test_manifest_generator():
-    root = Path("D:/code/learn_project/claude_code_project/ai-agent-framework")
+def test_manifest_generator(project_root):
+    root = project_root
     gen = ManifestGenerator(
         builtin_dir=root / "skills" / "builtin",
         extension_dir=root / "skills" / "extensions",

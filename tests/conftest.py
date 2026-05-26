@@ -29,4 +29,4 @@ def user_ctx_viewer():
 
 @pytest.fixture
 def project_root():
-    return Path("D:/code/learn_project/claude_code_project/ai-agent-framework")
+    return Path(__file__).resolve().parents[1]
