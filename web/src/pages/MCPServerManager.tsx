@@ -1,11 +1,12 @@
 import { useState, useEffect, useCallback } from 'react';
 import {
-  Button, Card, Col, Form, Input, message, Modal, Row, Select, Space, Spin, Switch, Tag, Typography, Upload,
+  Button, Card, Checkbox, Col, Form, Input, message, Modal, Row, Select, Space, Spin, Switch, Tag, Typography, Upload,
 } from 'antd';
 import { PlusOutlined, DeleteOutlined, LinkOutlined, DisconnectOutlined, UploadOutlined } from '@ant-design/icons';
 import { useMCPStore } from '../store/mcpStore';
+import { useAdminStore } from '../store/adminStore';
 import * as mcpApi from '../api/mcp';
-import type { MCPServerConfig, MCPToolInfo } from '../types/api';
+import type { MCPServerConfig, MCPToolInfo, UserRole } from '../types/api';
 
 const { Text } = Typography;
 
@@ -21,17 +22,62 @@ const EMPTY_FORM: MCPServerConfig = {
 
 export default function MCPServerManager() {
   const store = useMCPStore();
+  const adminStore = useAdminStore();
   const [selectedServer, setSelectedServer] = useState<string | null>(null);
   const [formData, setFormData] = useState<MCPServerConfig>(EMPTY_FORM);
   const [serverTools, setServerTools] = useState<MCPToolInfo[]>([]);
   const [saving, setSaving] = useState(false);
+  const [savingRoles, setSavingRoles] = useState(false);
   const [connecting, setConnecting] = useState(false);
   const [importing, setImporting] = useState(false);
   const [isNew, setIsNew] = useState(false);
+  const [draftServerRoles, setDraftServerRoles] = useState<Record<string, UserRole[]>>({});
+  const [dirtyServers, setDirtyServers] = useState<Record<string, boolean>>({});
 
   useEffect(() => {
     store.loadServers();
+    adminStore.loadRbacResources();
   }, []);
+
+  useEffect(() => {
+    if (!adminStore.rbacResources) return;
+    setDraftServerRoles((current) => {
+      const next = { ...current };
+      for (const server of adminStore.rbacResources.mcp_servers) {
+        if (!dirtyServers[server.name]) {
+          next[server.name] = server.roles;
+        }
+      }
+      return next;
+    });
+  }, [dirtyServers, adminStore.rbacResources]);
+
+  const getServerRoles = (serverName: string) => (
+    draftServerRoles[serverName]
+    || adminStore.rbacResources?.mcp_servers.find((server) => server.name === serverName)?.roles
+    || []
+  );
+
+  const handleServerRolesChange = (serverName: string, roles: UserRole[]) => {
+    setDraftServerRoles((current) => ({ ...current, [serverName]: roles }));
+    setDirtyServers((current) => ({ ...current, [serverName]: true }));
+  };
+
+  const handleSaveRoles = async () => {
+    if (!selectedServer || !adminStore.rbacResources) {
+      return;
+    }
+    setSavingRoles(true);
+    try {
+      await adminStore.updateMCPServerRoles(selectedServer, getServerRoles(selectedServer));
+      setDirtyServers((current) => ({ ...current, [selectedServer]: false }));
+      message.success('角色权限已保存');
+    } catch {
+      message.error('角色权限保存失败');
+    } finally {
+      setSavingRoles(false);
+    }
+  };
 
   const selectServer = useCallback(async (name: string) => {
     setSelectedServer(name);
@@ -57,6 +103,7 @@ export default function MCPServerManager() {
     try {
       const result = await mcpApi.importMCPServers(file);
       await store.loadServers();
+      await adminStore.loadRbacResources();
       const skipped = result.skipped.length ? `，跳过 ${result.skipped.length} 个` : '';
       if (result.errors.length) {
         message.warning(`已导入 ${result.imported.length} 个 MCP 配置，${result.errors.length} 个存在连接错误${skipped}`);
@@ -68,7 +115,7 @@ export default function MCPServerManager() {
     } finally {
       setImporting(false);
     }
-  }, [store]);
+  }, [adminStore, store]);
 
   const handleSave = useCallback(async () => {
     if (!formData.name) {
@@ -87,12 +134,13 @@ export default function MCPServerManager() {
         message.success('MCP 服务器更新成功');
       }
       await store.loadServers();
+      await adminStore.loadRbacResources();
     } catch {
       message.error('保存失败');
     } finally {
       setSaving(false);
     }
-  }, [formData, isNew, selectedServer, store]);
+  }, [adminStore, formData, isNew, selectedServer, store]);
 
   const handleDelete = useCallback(async () => {
     if (!selectedServer) return;
@@ -109,9 +157,10 @@ export default function MCPServerManager() {
         setFormData(EMPTY_FORM);
         setServerTools([]);
         await store.loadServers();
+        await adminStore.loadRbacResources();
       },
     });
-  }, [selectedServer, store]);
+  }, [adminStore, selectedServer, store]);
 
   const handleConnect = useCallback(async () => {
     if (!selectedServer) return;
@@ -250,6 +299,28 @@ export default function MCPServerManager() {
                 </Col>
               </Row>
 
+              {selectedServer && (
+                <Form.Item label="允许角色">
+                  <Space direction="vertical" size={8}>
+                    <Checkbox.Group
+                      options={adminStore.rbacResources?.roles || []}
+                      value={getServerRoles(selectedServer)}
+                      onChange={(roles) => handleServerRolesChange(selectedServer, roles as UserRole[])}
+                      disabled={!adminStore.rbacResources}
+                    />
+                    <Button
+                      size="small"
+                      aria-label="save mcp server roles"
+                      loading={savingRoles}
+                      onClick={handleSaveRoles}
+                      disabled={!adminStore.rbacResources}
+                    >
+                      保存角色权限
+                    </Button>
+                  </Space>
+                </Form.Item>
+              )}
+
               {formData.transport === 'stdio' ? (
                 <Row gutter={16}>
                   <Col span={12}>
@@ -295,7 +366,7 @@ export default function MCPServerManager() {
               )}
 
               <Space>
-                <Button type="primary" onClick={handleSave} loading={saving}>
+                <Button type="primary" aria-label="save mcp server config" onClick={handleSave} loading={saving}>
                   {isNew ? '创建' : '保存'}
                 </Button>
                 <Button onClick={() => { setIsNew(false); setSelectedServer(null); }}>
