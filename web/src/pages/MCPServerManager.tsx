@@ -41,9 +41,10 @@ export default function MCPServerManager() {
 
   useEffect(() => {
     if (!adminStore.rbacResources) return;
+    const { rbacResources } = adminStore;
     setDraftServerRoles((current) => {
       const next = { ...current };
-      for (const server of adminStore.rbacResources.mcp_servers) {
+      for (const server of rbacResources.mcp_servers) {
         if (!dirtyServers[server.name]) {
           next[server.name] = server.roles;
         }

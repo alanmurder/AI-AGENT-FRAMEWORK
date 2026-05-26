@@ -18,9 +18,10 @@ export default function SkillManager() {
 
   useEffect(() => {
     if (!store.rbacResources) return;
+    const { rbacResources } = store;
     setDraftRoles((current) => {
       const next = { ...current };
-      for (const skill of store.rbacResources.skills) {
+      for (const skill of rbacResources.skills) {
         if (!dirtySkills[skill.name]) {
           next[skill.name] = skill.roles;
         }
