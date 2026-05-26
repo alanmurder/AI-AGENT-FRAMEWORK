@@ -1,16 +1,56 @@
-import { Button, Card, message, Space, List, Spin, Upload } from 'antd';
+import { Button, Card, Checkbox, message, Space, List, Spin, Upload } from 'antd';
 import { UploadOutlined } from '@ant-design/icons';
 import { useAdminStore } from '../store/adminStore';
 import { useEffect, useState } from 'react';
 import { verifySkill, optimizeSkill, triggerAutoEvolution, importSkillZip } from '../api/admin';
+import type { UserRole } from '../types/api';
 
 export default function SkillManager() {
   const store = useAdminStore();
   const [loading, setLoading] = useState<string>('');
+  const [draftRoles, setDraftRoles] = useState<Record<string, UserRole[]>>({});
+  const [dirtySkills, setDirtySkills] = useState<Record<string, boolean>>({});
 
   useEffect(() => {
     store.loadSkills();
+    store.loadRbacResources();
   }, []);
+
+  useEffect(() => {
+    if (!store.rbacResources) return;
+    setDraftRoles((current) => {
+      const next = { ...current };
+      for (const skill of store.rbacResources.skills) {
+        if (!dirtySkills[skill.name]) {
+          next[skill.name] = skill.roles;
+        }
+      }
+      return next;
+    });
+  }, [dirtySkills, store.rbacResources]);
+
+  const getSkillRoles = (skillName: string) => draftRoles[skillName] || [];
+
+  const handleSkillRolesChange = (skillName: string, roles: UserRole[]) => {
+    setDraftRoles((current) => ({ ...current, [skillName]: roles }));
+    setDirtySkills((current) => ({ ...current, [skillName]: true }));
+  };
+
+  const handleSaveRoles = async (skillName: string) => {
+    if (!store.rbacResources) {
+      return;
+    }
+    setLoading(`roles:${skillName}`);
+    try {
+      await store.updateSkillRoles(skillName, getSkillRoles(skillName));
+      setDirtySkills((current) => ({ ...current, [skillName]: false }));
+      message.success('角色权限已保存');
+    } catch {
+      message.error('角色权限保存失败');
+    } finally {
+      setLoading('');
+    }
+  };
 
   const handleVerify = async () => {
     setLoading('verify');
@@ -69,7 +109,7 @@ export default function SkillManager() {
         <Button type="primary" loading={loading === 'verify'} onClick={handleVerify}>触发三Agent验证</Button>
         <Button loading={loading === 'evolution'} onClick={handleAutoEvolution}>触发自主进化</Button>
       </Space>
-      {loading && <Spin tip="处理中..." />}
+      {loading && !loading.startsWith('roles:') && <Spin tip="处理中..." />}
       <List
         grid={{ gutter: 16, column: 3 }}
         dataSource={store.skills}
@@ -78,7 +118,24 @@ export default function SkillManager() {
             <Card title={skill.name} size="small">
               <p style={{ fontSize: 13, color: '#666' }}>{skill.description}</p>
               <p style={{ fontSize: 12, color: '#999' }}>类别: {skill.category} | 访问: {skill.access}</p>
-              <Button size="small" onClick={() => handleOptimize(skill.name)}>GEPA优化</Button>
+              <Checkbox.Group
+                options={store.rbacResources?.roles || []}
+                value={getSkillRoles(skill.name)}
+                onChange={(roles) => handleSkillRolesChange(skill.name, roles as UserRole[])}
+                disabled={!store.rbacResources}
+                style={{ marginBottom: 8 }}
+              />
+              <Space size="small">
+                <Button size="small" onClick={() => handleOptimize(skill.name)}>GEPA优化</Button>
+                <Button
+                  size="small"
+                  loading={loading === `roles:${skill.name}`}
+                  onClick={() => handleSaveRoles(skill.name)}
+                  disabled={!store.rbacResources}
+                >
+                  保存角色权限
+                </Button>
+              </Space>
             </Card>
           </List.Item>
         )}
