@@ -6,7 +6,7 @@ import pytest
 import yaml
 from fastapi.testclient import TestClient
 
-from harness.mcp.types import MCPServerConfig
+from harness.mcp.types import MCPServerConfig, MCPToolInfo
 from harness.security import rbac
 from harness.skill.types import SkillAccess, SkillCategory, SkillInfo, SkillManifest
 from runtime.context_schema import UserContext, UserRole
@@ -272,6 +272,66 @@ def test_role_skills_endpoint_uses_exact_rbac_skill_allow_list(rbac_api):
         "file_manager": True,
         "database_query": False,
     }
+
+
+def test_role_mcp_tools_endpoint_honors_denies_under_wildcard(rbac_api, monkeypatch):
+    from gateway import server
+
+    path = _write_rbac(
+        rbac_api.path.parent,
+        {
+            "rbac": {
+                "roles": {
+                    "admin": {
+                        "mcp_tools": ["*"],
+                        "mcp_tools_denied": ["database:*"],
+                    },
+                }
+            }
+        },
+    )
+    monkeypatch.setattr(rbac, "DEFAULT_RBAC_CONFIG_PATH", str(path), raising=False)
+    rbac.clear_rbac_caches()
+
+    monkeypatch.setattr(
+        server,
+        "mcp_manager",
+        SimpleNamespace(
+            get_all_tools_info=lambda: [
+                MCPToolInfo("database", "query", "Query database"),
+                MCPToolInfo("filesystem", "read", "Read files"),
+            ],
+        ),
+    )
+
+    response = rbac_api.client.get(
+        "/api/roles/admin/mcp-tools",
+        headers={"Authorization": "Bearer token"},
+    )
+
+    assert response.status_code == 200
+    allowed_by_name = {tool["name"]: tool["allowed"] for tool in response.json()["mcp_tools"]}
+    assert allowed_by_name == {
+        "database:query": False,
+        "filesystem:read": True,
+    }
+
+
+def test_mcp_server_management_requires_admin(monkeypatch):
+    from runtime import models
+
+    monkeypatch.setattr(
+        models,
+        "create_mini_model",
+        lambda config: SimpleNamespace(),
+    )
+
+    from gateway import server
+
+    client = TestClient(server.app)
+
+    assert client.get("/api/mcp/servers").status_code == 401
+    assert client.get("/api/mcp/servers/filesystem").status_code == 401
 
 
 def test_list_skills_requires_authentication(monkeypatch):

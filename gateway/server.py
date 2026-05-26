@@ -764,8 +764,10 @@ class ResourceRolesRequest(BaseModel):
 
 
 @app.get("/api/mcp/servers")
-async def list_mcp_servers():
+async def list_mcp_servers(authorization: str = Header(default=None)):
     """List all configured MCP servers."""
+    require_admin(authorization)
+
     servers = mcp_manager.list_servers()
     return {
         "servers": [
@@ -776,9 +778,11 @@ async def list_mcp_servers():
     }
 
 
-@app.get("/api/mcp/servers/{name}")
-async def get_mcp_server(name: str):
+@app.get("/api/mcp/servers/{name:path}")
+async def get_mcp_server(name: str, authorization: str = Header(default=None)):
     """Get MCP server details and discovered tools."""
+    require_admin(authorization)
+
     config = mcp_manager.get_server(name)
     if not config:
         raise HTTPException(status_code=404, detail=f"MCP server '{name}' not found")
@@ -1325,22 +1329,18 @@ async def get_role_mcp_tools(role: str, authorization: str = Header(default=None
         target_role = user_ctx.role
 
     from harness.expert.validator import ExpertAgentValidator
+    from harness.security.rbac import mcp_tool_allowed
     allowed = ExpertAgentValidator.get_role_mcp_tools(target_role.value)
     all_tools = mcp_manager.get_all_tools_info()
 
     result = []
     for tool in all_tools:
-        tool_allowed = "*" in allowed or tool.full_name in allowed or any(
-            p.endswith(":") and tool.full_name.startswith(p) for p in allowed
-        ) or any(
-            p.endswith(":*") and tool.full_name.startswith(p[:-2] + ":") for p in allowed
-        )
         result.append({
             "name": tool.full_name,
             "server_name": tool.server_name,
             "tool_name": tool.tool_name,
             "description": tool.description,
-            "allowed": tool_allowed,
+            "allowed": mcp_tool_allowed(tool.full_name, allowed),
         })
     return {"role": target_role.value, "mcp_tools": result}
 

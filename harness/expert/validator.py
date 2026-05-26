@@ -51,9 +51,6 @@ class ExpertAgentValidator:
         """Intersect mcp_tools with role-allowed MCP tools. Supports wildcards."""
         allowed = get_role_mcp_tool_access().get(UserRole(role), [])
 
-        if "*" in allowed:
-            return mcp_tools
-
         valid = []
         for tool in mcp_tools:
             if mcp_tool_allowed(tool, allowed):
