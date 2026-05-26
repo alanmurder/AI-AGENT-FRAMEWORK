@@ -20,6 +20,9 @@ client.interceptors.response.use(
     const status = error.response?.status;
     if (status === 401) {
       localStorage.removeItem('token');
+      localStorage.removeItem('userId');
+      localStorage.removeItem('role');
+      localStorage.removeItem('agentId');
       window.location.href = '/login';
     } else if (status === 403) {
       message.error('权限不足');

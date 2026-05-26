@@ -1,4 +1,4 @@
-import { Layout, Menu, Tag } from 'antd';
+import { Button, Layout, Menu, Tag } from 'antd';
 import { MessageOutlined, AppstoreOutlined, SettingOutlined } from '@ant-design/icons';
 import { Outlet, useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../hooks/useAuth';
@@ -38,7 +38,9 @@ export default function AppLayout() {
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
           <Tag color={roleColors[role]}>{role}</Tag>
           <span style={{ color: '#fff' }}>{userId}</span>
-          <a style={{ color: '#fff', fontSize: 13 }} onClick={logout}>退出</a>
+          <Button type="link" style={{ color: '#fff', fontSize: 13, padding: 0 }} onClick={logout}>
+            退出
+          </Button>
         </div>
       </Header>
       <Content>

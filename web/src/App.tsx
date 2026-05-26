@@ -12,13 +12,18 @@ function AuthRedirect() {
   return isAuthenticated ? <Navigate to="/chat" /> : <Navigate to="/login" />;
 }
 
+function ProtectedLayout() {
+  const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
+  return isAuthenticated ? <AppLayout /> : <Navigate to="/login" replace />;
+}
+
 export default function App() {
   return (
-    <BrowserRouter>
+    <BrowserRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
       <Routes>
         <Route path="/login" element={<LoginPage />} />
         <Route path="/" element={<AuthRedirect />} />
-        <Route element={<AppLayout />}>
+        <Route element={<ProtectedLayout />}>
           <Route path="/chat" element={<ChatPage />} />
           <Route path="/agents" element={<AgentMarket />} />
           <Route path="/admin" element={<RoleGuard roles={['admin', 'manager']}><AdminPanel /></RoleGuard>} />

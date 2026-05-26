@@ -2,6 +2,14 @@ import { create } from 'zustand';
 import type { UserRole } from '../types/api';
 import { login as apiLogin } from '../api/auth';
 
+const ANONYMOUS_ROLE: UserRole = 'viewer';
+const storedToken = localStorage.getItem('token') || '';
+const storedRole = storedToken
+  ? ((localStorage.getItem('role') as UserRole) || ANONYMOUS_ROLE)
+  : ANONYMOUS_ROLE;
+const storedUserId = storedToken ? localStorage.getItem('userId') || '' : '';
+const storedAgentId = storedToken ? localStorage.getItem('agentId') || '' : '';
+
 interface AuthState {
   userId: string;
   role: UserRole;
@@ -14,11 +22,11 @@ interface AuthState {
 }
 
 export const useAuthStore = create<AuthState>((set) => ({
-  userId: localStorage.getItem('userId') || '',
-  role: (localStorage.getItem('role') as UserRole) || 'operator',
-  token: localStorage.getItem('token') || '',
-  agentId: localStorage.getItem('agentId') || '',
-  isAuthenticated: !!localStorage.getItem('token'),
+  userId: storedUserId,
+  role: storedRole,
+  token: storedToken,
+  agentId: storedAgentId,
+  isAuthenticated: !!storedToken,
 
   login: async (userId: string, password: string) => {
     const res = await apiLogin(userId, password);
@@ -40,7 +48,7 @@ export const useAuthStore = create<AuthState>((set) => ({
     localStorage.removeItem('userId');
     localStorage.removeItem('role');
     localStorage.removeItem('agentId');
-    set({ userId: '', role: 'operator', token: '', isAuthenticated: false, agentId: '' });
+    set({ userId: '', role: ANONYMOUS_ROLE, token: '', isAuthenticated: false, agentId: '' });
   },
 
   setAgentId: (agentId: string) => {
