@@ -1,6 +1,12 @@
-import { beforeEach, describe, expect, test } from 'vitest';
+import { beforeEach, describe, expect, test, vi } from 'vitest';
 import { useChatStore } from './chatStore';
 import type { Message } from '../types/chat';
+import { loadSessionMessages } from '../api/memory';
+
+vi.mock('../api/memory', () => ({
+  listSessions: vi.fn(),
+  loadSessionMessages: vi.fn(),
+}));
 
 function resetStore() {
   useChatStore.setState({
@@ -91,5 +97,79 @@ describe('chat process events', () => {
     const events = useChatStore.getState().activeProcessEvents;
     expect(events.map((event) => event.type)).toEqual(['progress', 'tool_call']);
     expect(useChatStore.getState().activeToolCalls[0].name).toBe('file_read');
+  });
+
+  test('finalizes process-only turns with an empty AI message', () => {
+    useChatStore.getState().handleStreamEvent({
+      type: 'progress',
+      stage: 'preparing_response',
+      content: 'Preparing response',
+      session_id: 'sess-1',
+    });
+    useChatStore.getState().handleStreamEvent({ type: 'done' });
+
+    const state = useChatStore.getState();
+    expect(state.messages).toHaveLength(1);
+    expect(state.messages[0].type).toBe('ai');
+    expect(state.messages[0].content).toBe('');
+    expect(state.messages[0].process_events?.map((event) => event.type)).toEqual(['progress']);
+    expect(state.activeProcessEvents).toEqual([]);
+  });
+
+  test('normalizes missing process event ids when loading session history', async () => {
+    vi.mocked(loadSessionMessages).mockResolvedValue({
+      user_id: 'user-1',
+      session_id: 'sess-1',
+      messages: [
+        {
+          timestamp: '2026-05-27T00:00:00.000Z',
+          type: 'ai',
+          content: 'Loaded',
+          process_events: [
+            { type: 'progress', stage: 'preparing_response', content: 'Preparing response' },
+            { id: 'existing-id', type: 'skill_use', name: 'file_manager' },
+          ],
+        } as never,
+      ],
+    });
+
+    await useChatStore.getState().loadSessionMessages('user-1', 'sess-1');
+
+    const processEvents = useChatStore.getState().messages[0].process_events;
+    expect(processEvents?.map((event) => event.id)).toEqual([
+      'sess-1-0-process-0',
+      'existing-id',
+    ]);
+  });
+
+  test('clears stale live state when loading session history', async () => {
+    useChatStore.setState({
+      streamingContent: 'stale',
+      isStreaming: true,
+      activeToolCalls: [{ id: 'tc1', name: 'file_read', args: { path: 'a.txt' } }],
+      activeProcessEvents: [{
+        id: 'progress-1',
+        type: 'progress',
+        stage: 'preparing_response',
+        content: 'Preparing response',
+      }],
+      sessionSkills: [{ name: 'file_manager', description: 'Files', category: 'file_manager' }],
+      sessionRole: 'operator',
+    });
+    vi.mocked(loadSessionMessages).mockResolvedValue({
+      user_id: 'user-1',
+      session_id: 'sess-1',
+      messages: [],
+    });
+
+    await useChatStore.getState().loadSessionMessages('user-1', 'sess-1');
+
+    const state = useChatStore.getState();
+    expect(state.streamingContent).toBe('');
+    expect(state.isStreaming).toBe(false);
+    expect(state.activeToolCalls).toEqual([]);
+    expect(state.activeProcessEvents).toEqual([]);
+    expect(state.sessionSkills).toEqual([]);
+    expect(state.sessionRole).toBe('');
   });
 });

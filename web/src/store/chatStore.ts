@@ -29,6 +29,13 @@ function processEventId(prefix: string) {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
+function normalizeProcessEvent(event: ProcessEvent | (Omit<ProcessEvent, 'id'> & { id?: string }), fallbackId: string): ProcessEvent {
+  return {
+    ...event,
+    id: event.id || fallbackId,
+  } as ProcessEvent;
+}
+
 export const useChatStore = create<ChatState>((set, get) => ({
   sessions: [],
   currentSessionId: '',
@@ -55,16 +62,28 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const res = await loadSessionMessages(userId, sessionId);
     const messages: Message[] = res.messages.map((m, i) => {
       const persistedMessage = m as typeof m & { process_events?: ProcessEvent[] };
+      const messageId = `${sessionId}-${i}`;
       return {
-        id: `${sessionId}-${i}`,
+        id: messageId,
         type: m.type as Message['type'],
         content: m.content,
         timestamp: m.timestamp,
         tool_calls: m.tool_calls?.map((tc) => ({ id: tc.id, name: tc.name, args: tc.args })),
-        process_events: persistedMessage.process_events?.map((event) => ({ ...event })),
+        process_events: persistedMessage.process_events?.map((event, eventIndex) => (
+          normalizeProcessEvent(event, `${messageId}-process-${eventIndex}`)
+        )),
       };
     });
-    set({ messages, currentSessionId: sessionId });
+    set({
+      messages,
+      currentSessionId: sessionId,
+      streamingContent: '',
+      isStreaming: false,
+      activeToolCalls: [],
+      activeProcessEvents: [],
+      sessionSkills: [],
+      sessionRole: '',
+    });
   },
 
   startNewSession: () => set({
@@ -104,7 +123,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   })),
 
   finalizeStream: () => set((state) => {
-    if (!state.streamingContent) {
+    if (!state.streamingContent && state.activeProcessEvents.length === 0) {
       return {
         isStreaming: false,
         activeToolCalls: [],
