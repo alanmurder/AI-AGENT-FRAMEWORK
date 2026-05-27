@@ -26,7 +26,7 @@ class MCPClient:
             return self._tools_info
 
         from mcp import ClientSession
-        from mcp.client.stdio import stdio_client
+        from mcp.client.stdio import StdioServerParameters, stdio_client
         from mcp.client.sse import sse_client
 
         env = os.environ.copy()
@@ -35,11 +35,12 @@ class MCPClient:
             env[k] = resolved
 
         if self.config.transport == "stdio":
-            self._transport = stdio_client(
+            server_params = StdioServerParameters(
                 command=self.config.command,
                 args=self.config.args,
                 env=env,
             )
+            self._transport = stdio_client(server_params)
         elif self.config.transport == "sse":
             self._transport = sse_client(url=self.config.url)
         else:
