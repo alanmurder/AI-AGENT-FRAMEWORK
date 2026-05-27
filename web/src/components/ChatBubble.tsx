@@ -1,5 +1,6 @@
 import type { Message } from '../types/chat';
 import ReactMarkdown from 'react-markdown';
+import ProcessTimeline from './ProcessTimeline';
 
 interface ChatBubbleProps {
   message: Message;
@@ -22,6 +23,7 @@ export default function ChatBubble({ message }: ChatBubbleProps) {
           wordBreak: 'break-word',
         }}
       >
+        {!isHuman && <ProcessTimeline events={message.process_events} />}
         <ReactMarkdown>{message.content}</ReactMarkdown>
       </div>
     </div>

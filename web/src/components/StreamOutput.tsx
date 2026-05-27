@@ -1,8 +1,9 @@
 import ReactMarkdown from 'react-markdown';
 import { useChatStore } from '../store/chatStore';
+import ProcessTimeline from './ProcessTimeline';
 
 export default function StreamOutput() {
-  const { streamingContent, isStreaming } = useChatStore();
+  const { streamingContent, isStreaming, activeProcessEvents } = useChatStore();
 
   if (!streamingContent && !isStreaming) return null;
 
@@ -17,6 +18,7 @@ export default function StreamOutput() {
         border: '1px solid #e8e8e8',
         wordBreak: 'break-word',
       }}>
+        <ProcessTimeline events={activeProcessEvents} />
         <ReactMarkdown>{streamingContent}</ReactMarkdown>
         {isStreaming && <span style={{ opacity: 0.5 }}>▌</span>}
       </div>

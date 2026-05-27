@@ -6,7 +6,6 @@ import { useAuthStore } from '../store/authStore';
 import { useAgentChat } from '../hooks/useAgentChat';
 import ChatBubble from '../components/ChatBubble';
 import StreamOutput from '../components/StreamOutput';
-import ToolCallCard from '../components/ToolCallCard';
 import SessionList from '../components/SessionList';
 
 export default function ChatPage() {
@@ -49,9 +48,6 @@ export default function ChatPage() {
         <div style={{ flex: 1, padding: 16, overflowY: 'auto', background: '#fafafa' }}>
           {chatStore.messages.map((msg) => (
             msg.type === 'tool' ? null : <ChatBubble key={msg.id} message={msg} />
-          ))}
-          {chatStore.activeToolCalls.map((tc) => (
-            <ToolCallCard key={tc.id} toolCall={tc} />
           ))}
           <StreamOutput />
         </div>
