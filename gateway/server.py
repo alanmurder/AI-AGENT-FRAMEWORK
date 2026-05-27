@@ -15,6 +15,7 @@ from email.policy import default as email_default_policy
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Depends, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from langchain_core.messages import ToolMessage
 from pydantic import BaseModel
 
 from runtime.config import AgentConfig
@@ -44,6 +45,14 @@ from harness.expert.agent_factory import create_expert_agent
 from harness.expert.types import AgentProfile, EndpointConfig
 from harness.external_agent.types import ExternalEndpoint, get_adapter
 from harness.external_agent.proxy import AgentProxyHandler
+from harness.observability.chat_process import (
+    build_progress_event,
+    build_skill_manifest_event,
+    build_tool_call_event,
+    extract_skill_use_events,
+    get_session_skill_infos,
+    truncate_for_log,
+)
 
 # Configure structlog — uses stdlib logging so output goes to both console and file
 structlog.configure(
@@ -1604,6 +1613,7 @@ async def ws_chat(websocket: WebSocket):
     """
     await websocket.accept()
     agent = None
+    session_skill_names: set[str] = set()
 
     try:
         # First message must contain auth info
@@ -1674,7 +1684,32 @@ async def ws_chat(websocket: WebSocket):
             "session_id": user_ctx.session_id,
             "agent_id": agent_id,
             "agent_type": "external" if is_external else ("expert" if profile else "generic"),
-        }))
+        }, ensure_ascii=False))
+
+        if not is_external:
+            try:
+                session_skill_infos = get_session_skill_infos(skill_manager, user_ctx, profile)
+                session_skill_names = {skill.name for skill in session_skill_infos}
+                await websocket.send_text(json.dumps(
+                    build_skill_manifest_event(session_skill_infos, user_ctx, agent_id),
+                    ensure_ascii=False,
+                ))
+                logger.info(
+                    "chat_skill_manifest_loaded",
+                    user_id=user_ctx.user_id,
+                    session_id=user_ctx.session_id,
+                    agent_id=agent_id,
+                    role=user_ctx.role.value,
+                    skill_names=sorted(session_skill_names),
+                )
+            except Exception as e:
+                logger.warning(
+                    "chat_skill_manifest_failed",
+                    user_id=user_ctx.user_id,
+                    session_id=user_ctx.session_id,
+                    agent_id=agent_id,
+                    error=str(e),
+                )
 
         logger.info("ws_connected", user_id=user_ctx.user_id, session_id=user_ctx.session_id)
 
@@ -1707,6 +1742,34 @@ async def ws_chat(websocket: WebSocket):
                 )
             else:
                 # ── Internal agent: LangChain stream ──
+                turn_process_events: list[dict] = []
+                turn_tool_calls: list[dict] = []
+                full_response = ""
+
+                progress_event = build_progress_event(
+                    "preparing_response",
+                    "Preparing response",
+                    user_ctx,
+                    agent_id,
+                )
+                turn_process_events.append(progress_event)
+                await websocket.send_text(json.dumps(progress_event, ensure_ascii=False))
+                logger.info(
+                    "chat_progress_emitted",
+                    user_id=user_id,
+                    session_id=user_ctx.session_id,
+                    agent_id=agent_id,
+                    stage=progress_event["stage"],
+                    content=progress_event["content"],
+                )
+
+                session_persistence.write_message(
+                    user_ctx.user_id,
+                    user_ctx.session_id,
+                    {"timestamp": "", "type": "human", "content": user_message},
+                    agent_id=agent_id,
+                )
+
                 for chunk in agent.stream(
                     {"messages": [{"role": "user", "content": user_message}]},
                     config={"configurable": {"context": user_ctx}},
@@ -1716,22 +1779,80 @@ async def ws_chat(websocket: WebSocket):
                         if not node_output or not isinstance(node_output, dict):
                             continue
                         for msg in node_output.get("messages", []):
-                            session_persistence.write_message(user_ctx.user_id, user_ctx.session_id, msg, agent_id=agent_id)
-                            if hasattr(msg, "content") and msg.content and getattr(msg, "type", None) == "ai":
-                                await websocket.send_text(json.dumps({
-                                    "type": "chunk",
-                                    "content": msg.content,
-                                }))
-                            if hasattr(msg, "tool_calls") and msg.tool_calls:
+                            if isinstance(msg, ToolMessage):
+                                session_persistence.write_message(user_ctx.user_id, user_ctx.session_id, msg, agent_id=agent_id)
+                                continue
+
+                            if getattr(msg, "type", None) == "ai" and hasattr(msg, "tool_calls") and msg.tool_calls:
                                 for tc in msg.tool_calls:
+                                    tool_call_event = build_tool_call_event(tc, user_ctx, agent_id)
+                                    await websocket.send_text(json.dumps(tool_call_event, ensure_ascii=False))
+                                    turn_tool_calls.append(tool_call_event)
+                                    turn_process_events.append(tool_call_event)
+                                    logger.info(
+                                        "chat_tool_call_emitted",
+                                        user_id=user_id,
+                                        session_id=user_ctx.session_id,
+                                        agent_id=agent_id,
+                                        tool_call_id=tool_call_event.get("id"),
+                                        name=tool_call_event.get("name"),
+                                        args=truncate_for_log(tool_call_event.get("args", {})),
+                                    )
+
+                            if hasattr(msg, "content") and msg.content and getattr(msg, "type", None) == "ai":
+                                content = msg.content if isinstance(msg.content, str) else str(msg.content)
+                                visible_content, skill_events, ignored_declarations = extract_skill_use_events(
+                                    content,
+                                    session_skill_names,
+                                    user_ctx.session_id,
+                                    agent_id,
+                                )
+                                for skill_event in skill_events:
+                                    await websocket.send_text(json.dumps(skill_event, ensure_ascii=False))
+                                    turn_process_events.append(skill_event)
+                                    logger.info(
+                                        "chat_skill_use_emitted",
+                                        user_id=user_id,
+                                        session_id=user_ctx.session_id,
+                                        agent_id=agent_id,
+                                        name=skill_event.get("name"),
+                                        phase=skill_event.get("phase"),
+                                        reason=skill_event.get("reason"),
+                                    )
+                                for ignored in ignored_declarations:
+                                    logger.info(
+                                        "chat_skill_use_ignored",
+                                        user_id=user_id,
+                                        session_id=user_ctx.session_id,
+                                        agent_id=agent_id,
+                                        name=ignored.get("name"),
+                                        phase=ignored.get("phase"),
+                                        reason=ignored.get("reason"),
+                                    )
+
+                                if visible_content:
+                                    full_response += visible_content
                                     await websocket.send_text(json.dumps({
-                                        "type": "tool_call",
-                                        "name": tc.get("name", ""),
-                                        "args": tc.get("args", {}),
-                                    }))
+                                        "type": "chunk",
+                                        "content": visible_content,
+                                    }, ensure_ascii=False))
+
+                session_persistence.write_message(
+                    user_ctx.user_id,
+                    user_ctx.session_id,
+                    {
+                        "timestamp": "",
+                        "type": "ai",
+                        "content": full_response,
+                        "tool_calls": turn_tool_calls,
+                        "process_events": turn_process_events,
+                    },
+                    agent_id=agent_id,
+                    process_events=turn_process_events,
+                )
 
             # Send completion signal
-            await websocket.send_text(json.dumps({"type": "done"}))
+            await websocket.send_text(json.dumps({"type": "done"}, ensure_ascii=False))
 
     except WebSocketDisconnect:
         logger.info("ws_disconnected", user_id=user_ctx.user_id if 'user_ctx' in dir() else "unknown")

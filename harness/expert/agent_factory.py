@@ -23,8 +23,18 @@ from harness.middleware.output_validation import OutputValidationMiddleware
 from harness.middleware.memory_archive import MemoryArchiveMiddleware
 from harness.middleware.sandbox import SandboxMiddleware
 from harness.security.rbac import get_role_mcp_tool_access
+from harness.observability.chat_process import SKILL_USE_PROTOCOL_INSTRUCTION
 
 logger = structlog.get_logger()
+
+
+def build_expert_system_prompt(profile: AgentProfile, soul_content: str) -> str:
+    """Build an expert Agent prompt with the public Skill-use protocol."""
+    base_prompt = soul_content or f"You are {profile.display_name}. {profile.description}"
+    return (
+        f"{base_prompt}\n\n"
+        f"--- PUBLIC PROCESS EVENTS ---\n{SKILL_USE_PROTOCOL_INSTRUCTION}\n--- END PUBLIC PROCESS EVENTS ---"
+    )
 
 
 def create_expert_agent(
@@ -62,7 +72,7 @@ def create_expert_agent(
     context_config = build_context_config(config)
     compressor = ContextCompressor(context_config, mini_model)
 
-    system_prompt = soul_content or f"You are {profile.display_name}. {profile.description}"
+    system_prompt = build_expert_system_prompt(profile, soul_content)
 
     memory_manager.init_user(user_ctx.user_id)
 

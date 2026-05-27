@@ -20,6 +20,7 @@ from harness.middleware.output_validation import OutputValidationMiddleware
 from harness.middleware.memory_archive import MemoryArchiveMiddleware
 from harness.middleware.sandbox import SandboxMiddleware
 from harness.sandbox.manager import SandboxManager
+from harness.observability.chat_process import SKILL_USE_PROTOCOL_INSTRUCTION
 
 
 # Roles that can use spawn_subagent tool
@@ -27,6 +28,16 @@ SUBAGENT_CAPABLE_ROLES = {UserRole.ADMIN, UserRole.MANAGER}
 
 # Roles that can use captain team tools (delegate_task, collect_results)
 CAPTAIN_CAPABLE_ROLES = {UserRole.ADMIN, UserRole.MANAGER}
+
+
+def build_generic_system_prompt(user_ctx: UserContext) -> str:
+    """Build the generic Agent prompt with the public Skill-use protocol."""
+    return (
+        f"You are an enterprise AI assistant. You are helping user '{user_ctx.user_id}' "
+        f"with role '{user_ctx.role.value}'. Follow Skill instructions when available. "
+        f"Be professional and practical.\n\n"
+        f"--- PUBLIC PROCESS EVENTS ---\n{SKILL_USE_PROTOCOL_INSTRUCTION}\n--- END PUBLIC PROCESS EVENTS ---"
+    )
 
 
 def create_agent_for_user(
@@ -67,7 +78,7 @@ def create_agent_for_user(
     compressor = ContextCompressor(context_config, mini_model)
 
     # Build system prompt — inject Team manifest if team is enabled for captains
-    system_prompt = f"You are an enterprise AI assistant. You are helping user '{user_ctx.user_id}' with role '{user_ctx.role.value}'. Follow Skill instructions when available. Be professional and practical."
+    system_prompt = build_generic_system_prompt(user_ctx)
 
     if config.team_enabled and user_ctx.role in CAPTAIN_CAPABLE_ROLES:
         from harness.team.member_pool import TeamManager
