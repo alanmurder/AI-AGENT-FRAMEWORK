@@ -21,11 +21,9 @@ export function useAgentChat() {
       content,
       timestamp: new Date().toISOString(),
     };
-    useChatStore.setState((state) => ({
-      messages: [...state.messages, userMessage],
-    }));
+    chatStore.beginUserTurn(userMessage);
     sendMessage(content);
-  }, [sendMessage]);
+  }, [chatStore, sendMessage]);
 
   const switchAgent = useCallback((agentId: string) => {
     authStore.setAgentId(agentId);
