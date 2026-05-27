@@ -577,3 +577,6 @@ npm run build
 11. `harness/mcp/manager.py`
 12. `web/src/App.tsx`
 13. `web/src/hooks/useWebSocket.ts`
+
+
+你在写总结或者设计计划类的文档时，请保持用中文书写。
