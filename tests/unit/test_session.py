@@ -62,3 +62,50 @@ def test_load_nonexistent_session(tmp_path):
     sp = SessionPersistence(tmp_path)
     msgs = sp.load_session("unknown", "nonexistent")
     assert msgs == []
+
+
+def test_ai_message_persists_process_events(tmp_path):
+    sp = SessionPersistence(tmp_path)
+    process_events = [
+        {
+            "type": "skill_use",
+            "name": "knowledge_search",
+            "phase": "answering",
+            "reason": "Need docs",
+            "session_id": "sess-process",
+        }
+    ]
+
+    sp.write_message(
+        "user1",
+        "sess-process",
+        AIMessage(content="Answer"),
+        process_events=process_events,
+    )
+
+    msgs = sp.load_session("user1", "sess-process")
+    assert msgs[0]["process_events"] == process_events
+
+
+def test_dict_message_persistence_supports_process_events_and_tool_calls(tmp_path):
+    sp = SessionPersistence(tmp_path)
+    process_events = [{"type": "tool_call", "name": "file_read", "args": {"path": "a.txt"}}]
+
+    sp.write_message(
+        "user1",
+        "sess-dict",
+        {
+            "type": "ai",
+            "content": "Answer from dict",
+            "tool_calls": [{"id": "tc1", "name": "file_read", "args": {"path": "a.txt"}}],
+        },
+        agent_id="agent-1",
+        process_events=process_events,
+    )
+
+    msgs = sp.load_session("user1", "sess-dict")
+    assert msgs[0]["type"] == "ai"
+    assert msgs[0]["content"] == "Answer from dict"
+    assert msgs[0]["agent_id"] == "agent-1"
+    assert msgs[0]["tool_calls"][0]["name"] == "file_read"
+    assert msgs[0]["process_events"] == process_events

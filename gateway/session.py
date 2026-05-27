@@ -23,25 +23,49 @@ class SessionPersistence:
         d.mkdir(parents=True, exist_ok=True)
         return d / f"{session_id}.jsonl"
 
-    def write_message(self, user_id: str, session_id: str, msg: BaseMessage, agent_id: str = "") -> None:
+    def write_message(
+        self,
+        user_id: str,
+        session_id: str,
+        msg: BaseMessage | dict,
+        agent_id: str = "",
+        process_events: list[dict] | None = None,
+    ) -> None:
         """Append a message to the session JSONL file."""
         path = self._session_path(user_id, session_id)
 
-        record = {
-            "timestamp": datetime.now().isoformat(),
-            "type": msg.type,
-            "content": msg.content if isinstance(msg.content, str) else str(msg.content),
-            "agent_id": agent_id,
-        }
+        if isinstance(msg, dict):
+            record = {
+                "timestamp": msg.get("timestamp") or datetime.now().isoformat(),
+                "type": msg.get("type", ""),
+                "content": msg.get("content", ""),
+                "agent_id": msg.get("agent_id", agent_id),
+            }
+            if msg.get("tool_calls") is not None:
+                record["tool_calls"] = msg.get("tool_calls", [])
+            if msg.get("tool_call_id") is not None:
+                record["tool_call_id"] = msg.get("tool_call_id")
+            if msg.get("name") is not None:
+                record["name"] = msg.get("name")
+        else:
+            record = {
+                "timestamp": datetime.now().isoformat(),
+                "type": msg.type,
+                "content": msg.content if isinstance(msg.content, str) else str(msg.content),
+                "agent_id": agent_id,
+            }
 
-        if isinstance(msg, AIMessage):
-            record["tool_calls"] = [
-                {"id": tc.get("id"), "name": tc.get("name"), "args": tc.get("args")}
-                for tc in msg.tool_calls
-            ]
-        elif isinstance(msg, ToolMessage):
-            record["tool_call_id"] = msg.tool_call_id
-            record["name"] = msg.name
+            if isinstance(msg, AIMessage):
+                record["tool_calls"] = [
+                    {"id": tc.get("id"), "name": tc.get("name"), "args": tc.get("args")}
+                    for tc in msg.tool_calls
+                ]
+            elif isinstance(msg, ToolMessage):
+                record["tool_call_id"] = msg.tool_call_id
+                record["name"] = msg.name
+
+        if process_events is not None:
+            record["process_events"] = process_events
 
         with open(path, "a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
