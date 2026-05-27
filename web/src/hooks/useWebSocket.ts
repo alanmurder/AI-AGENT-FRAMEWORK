@@ -8,6 +8,12 @@ interface WebSocketOptions {
   autoConnect?: boolean;
 }
 
+export function isGatewayAuthError(event: StreamEvent) {
+  if (event.type !== 'error') return false;
+  const content = (event.content || '').toLowerCase();
+  return content.includes('invalid or missing authentication');
+}
+
 export function useWebSocket(options: WebSocketOptions = {}) {
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectAttempts = useRef(0);
@@ -87,7 +93,7 @@ export function useWebSocket(options: WebSocketOptions = {}) {
     ws.onmessage = (event) => {
       try {
         const data: StreamEvent = JSON.parse(event.data);
-        if (data.type === 'error' && (data.content || '').includes('authentication')) {
+        if (isGatewayAuthError(data)) {
           authFailed.current = true;
           authStore.logout();
           disconnect();
