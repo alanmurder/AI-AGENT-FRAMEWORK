@@ -1661,6 +1661,7 @@ async def ws_chat(websocket: WebSocket):
     await websocket.accept()
     agent = None
     session_skill_names: set[str] = set()
+    session_skill_manifest_event: dict | None = None
 
     try:
         # First message must contain auth info
@@ -1737,8 +1738,9 @@ async def ws_chat(websocket: WebSocket):
             try:
                 session_skill_infos = get_session_skill_infos(skill_manager, user_ctx, profile)
                 session_skill_names = {skill.name for skill in session_skill_infos}
+                session_skill_manifest_event = build_skill_manifest_event(session_skill_infos, user_ctx, agent_id)
                 await websocket.send_text(json.dumps(
-                    build_skill_manifest_event(session_skill_infos, user_ctx, agent_id),
+                    session_skill_manifest_event,
                     ensure_ascii=False,
                 ))
                 logger.info(
@@ -1789,7 +1791,9 @@ async def ws_chat(websocket: WebSocket):
                 )
             else:
                 # ── Internal agent: LangChain stream ──
-                turn_process_events: list[dict] = []
+                turn_process_events: list[dict] = (
+                    [dict(session_skill_manifest_event)] if session_skill_manifest_event else []
+                )
                 full_response = ""
                 final_ai_written = False
 
@@ -1832,7 +1836,12 @@ async def ws_chat(websocket: WebSocket):
                                     continue
 
                                 if getattr(msg, "type", None) == "ai" and hasattr(msg, "tool_calls") and msg.tool_calls:
-                                    session_persistence.write_message(user_ctx.user_id, user_ctx.session_id, msg, agent_id=agent_id)
+                                    session_persistence.write_message(
+                                        user_ctx.user_id,
+                                        user_ctx.session_id,
+                                        _strip_ai_message_for_persistence(msg, user_ctx.session_id, agent_id),
+                                        agent_id=agent_id,
+                                    )
                                     for tc in msg.tool_calls:
                                         tool_call_event = build_tool_call_event(tc, user_ctx, agent_id)
                                         await websocket.send_text(json.dumps(tool_call_event, ensure_ascii=False))
