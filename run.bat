@@ -82,5 +82,6 @@ echo   http://localhost:8000/docs   — API Docs
 echo ============================================
 echo.
 echo Close the "AI-Agent-Platform" window to stop the server.
+echo If port 8000 is still occupied, run stop.bat.
 echo.
 pause

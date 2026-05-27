@@ -27,5 +27,6 @@ echo   API Docs: http://localhost:8000/docs
 echo ========================================
 echo.
 echo Close the two cmd windows to stop services.
+echo If a port is still occupied, run stop.bat.
 echo.
 pause
