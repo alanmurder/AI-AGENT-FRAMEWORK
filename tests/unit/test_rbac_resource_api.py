@@ -142,6 +142,44 @@ def test_get_rbac_resources_returns_roles_skills_and_mcp_servers(rbac_api):
     ]
 
 
+def test_mcp_server_endpoints_include_connected_state(rbac_api, monkeypatch):
+    from gateway import server
+
+    servers = {
+        "filesystem": MCPServerConfig(name="filesystem", enabled=True),
+        "github": MCPServerConfig(name="github", enabled=True),
+    }
+    monkeypatch.setattr(
+        server,
+        "mcp_manager",
+        SimpleNamespace(
+            list_servers=lambda: list(servers.values()),
+            get_server=lambda name: servers.get(name),
+            get_server_tools=lambda name: [
+                MCPToolInfo("filesystem", "read", "Read files"),
+            ] if name == "filesystem" else [],
+            is_server_connected=lambda name: name == "filesystem",
+        ),
+    )
+
+    list_response = rbac_api.client.get("/api/mcp/servers")
+    detail_response = rbac_api.client.get("/api/mcp/servers/filesystem")
+
+    assert list_response.status_code == 200
+    assert [
+        {"name": server["name"], "connected": server["connected"]}
+        for server in list_response.json()["servers"]
+    ] == [
+        {"name": "filesystem", "connected": True},
+        {"name": "github", "connected": False},
+    ]
+    assert detail_response.status_code == 200
+    detail = detail_response.json()
+    assert detail["connected"] is True
+    assert detail["config"]["connected"] is True
+    assert detail["tools"][0]["full_name"] == "filesystem:read"
+
+
 def test_put_skill_roles_updates_yaml(rbac_api):
     response = rbac_api.client.put(
         "/api/rbac/skills/database_query/roles",

@@ -51,6 +51,7 @@ function setMCPStore() {
       command: 'npx',
       args: ['-y', '@modelcontextprotocol/server-filesystem'],
       enabled: true,
+      connected: true,
       env: {},
     }],
     tools: [],
@@ -87,8 +88,10 @@ describe('MCPServerManager role permissions', () => {
         command: 'npx',
         args: ['-y', '@modelcontextprotocol/server-filesystem'],
         enabled: true,
+        connected: true,
         env: {},
       },
+      connected: true,
       tools: [],
     });
     setMCPStore();
@@ -111,6 +114,25 @@ describe('MCPServerManager role permissions', () => {
     await waitFor(() => {
       expect(updateMCPServerRoles).toHaveBeenCalledWith('filesystem', ['admin', 'operator']);
     });
+  });
+
+  test('shows runtime connection state separately from enabled state', async () => {
+    useMCPStore.setState({
+      servers: [{
+        name: 'filesystem',
+        transport: 'stdio',
+        command: 'npx',
+        args: ['-y', '@modelcontextprotocol/server-filesystem'],
+        enabled: true,
+        connected: false,
+        env: {},
+      }],
+    });
+
+    render(<MCPServerManager />);
+
+    expect(await screen.findByText('已启用')).toBeTruthy();
+    expect(await screen.findByText('未连接')).toBeTruthy();
   });
 
   test('does not save permissions before RBAC resources load', async () => {

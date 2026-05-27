@@ -146,6 +146,7 @@ export interface MCPServerConfig {
   args?: string[];
   url?: string;
   enabled: boolean;
+  connected?: boolean;
   env?: Record<string, string>;
 }
 
@@ -158,6 +159,7 @@ export interface MCPToolInfo {
 
 export interface MCPServerDetail {
   config: MCPServerConfig;
+  connected?: boolean;
   tools: MCPToolInfo[];
 }
 
@@ -238,6 +240,7 @@ export interface RbacSkillResource {
 export interface RbacMCPServerResource {
   name: string;
   enabled: boolean;
+  connected?: boolean;
   roles: UserRole[];
 }
 

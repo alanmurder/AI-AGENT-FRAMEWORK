@@ -129,6 +129,11 @@ class MCPManager:
     def get_server(self, name: str) -> MCPServerConfig | None:
         return self._store.get_server(name)
 
+    def is_server_connected(self, name: str) -> bool:
+        """Return whether a server has an active runtime connection."""
+        client = self._clients.get(name)
+        return bool(client and client.is_connected())
+
     # ── internal ──
 
     async def _connect_server(self, config: MCPServerConfig) -> list[MCPToolInfo]:

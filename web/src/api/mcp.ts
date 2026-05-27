@@ -33,12 +33,12 @@ export async function deleteMCPServer(name: string): Promise<{ deleted: string }
   return res.data;
 }
 
-export async function connectMCPServer(name: string): Promise<{ status: string; server: string; tools: number }> {
+export async function connectMCPServer(name: string): Promise<{ status: string; server: string; connected: boolean; tools: number }> {
   const res = await client.post(`/api/mcp/servers/${name}/connect`);
   return res.data;
 }
 
-export async function disconnectMCPServer(name: string): Promise<{ status: string; server: string }> {
+export async function disconnectMCPServer(name: string): Promise<{ status: string; server: string; connected: boolean }> {
   const res = await client.post(`/api/mcp/servers/${name}/disconnect`);
   return res.data;
 }

@@ -12,7 +12,7 @@ interface MCPState {
   createServer: (config: MCPServerConfig) => Promise<void>;
   updateServer: (name: string, config: MCPServerConfig) => Promise<void>;
   deleteServer: (name: string) => Promise<void>;
-  connectServer: (name: string) => Promise<{ status: string; server: string; tools: number }>;
+  connectServer: (name: string) => Promise<{ status: string; server: string; connected: boolean; tools: number }>;
   disconnectServer: (name: string) => Promise<void>;
 }
 

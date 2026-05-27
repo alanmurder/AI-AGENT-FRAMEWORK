@@ -170,7 +170,9 @@ export default function MCPServerManager() {
       const result = await store.connectServer(selectedServer);
       message.success(`已连接，发现 ${result.tools} 个工具`);
       const data = await mcpApi.getMCPServer(selectedServer);
+      setFormData(data.config);
       setServerTools(data.tools || []);
+      await store.loadServers();
     } catch {
       message.error('连接失败');
     } finally {
@@ -183,7 +185,10 @@ export default function MCPServerManager() {
     try {
       await store.disconnectServer(selectedServer);
       message.success('已断开连接');
+      const data = await mcpApi.getMCPServer(selectedServer);
+      setFormData(data.config);
       setServerTools([]);
+      await store.loadServers();
     } catch {
       message.error('断开失败');
     }
@@ -225,6 +230,7 @@ export default function MCPServerManager() {
                     <Space>
                       <Text strong>{s.name}</Text>
                       <Tag color={s.enabled ? 'green' : 'default'}>{s.enabled ? '已启用' : '已禁用'}</Tag>
+                      <Tag color={s.connected ? 'blue' : 'default'}>{s.connected ? '已连接' : '未连接'}</Tag>
                     </Space>
                     <Text type="secondary" style={{ fontSize: 12 }}>
                       {s.transport === 'stdio' ? `stdio: ${s.command}` : `sse: ${s.url}`}
@@ -245,6 +251,9 @@ export default function MCPServerManager() {
           extra={
             selectedServer && (
               <Space>
+                <Tag color={formData.connected ? 'blue' : 'default'}>
+                  {formData.connected ? '已连接' : '未连接'}
+                </Tag>
                 <Button
                   size="small"
                   icon={<LinkOutlined />}

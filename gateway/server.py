@@ -818,6 +818,23 @@ class ResourceRolesRequest(BaseModel):
     roles: list[str]
 
 
+def _is_mcp_server_connected(name: str) -> bool:
+    checker = getattr(mcp_manager, "is_server_connected", None)
+    return bool(checker(name)) if callable(checker) else False
+
+
+def _mcp_server_config_payload(server_config) -> dict:
+    return {
+        "name": server_config.name,
+        "transport": server_config.transport,
+        "command": server_config.command,
+        "args": server_config.args,
+        "url": server_config.url,
+        "enabled": server_config.enabled,
+        "connected": _is_mcp_server_connected(server_config.name),
+    }
+
+
 @app.get("/api/mcp/servers")
 async def list_mcp_servers(authorization: str = Header(default=None)):
     """List all configured MCP servers."""
@@ -826,8 +843,7 @@ async def list_mcp_servers(authorization: str = Header(default=None)):
     servers = mcp_manager.list_servers()
     return {
         "servers": [
-            {"name": s.name, "transport": s.transport, "command": s.command,
-             "args": s.args, "url": s.url, "enabled": s.enabled}
+            _mcp_server_config_payload(s)
             for s in servers
         ]
     }
@@ -842,10 +858,19 @@ async def get_mcp_server(name: str, authorization: str = Header(default=None)):
     if not config:
         raise HTTPException(status_code=404, detail=f"MCP server '{name}' not found")
     tools = mcp_manager.get_server_tools(name)
+    connected = _is_mcp_server_connected(name)
     return {
-        "config": {"name": config.name, "transport": config.transport, "command": config.command,
-                   "args": config.args, "url": config.url, "enabled": config.enabled},
-        "tools": [{"server_name": t.server_name, "tool_name": t.tool_name, "description": t.description} for t in tools],
+        "config": _mcp_server_config_payload(config),
+        "connected": connected,
+        "tools": [
+            {
+                "server_name": t.server_name,
+                "tool_name": t.tool_name,
+                "full_name": t.full_name,
+                "description": t.description,
+            }
+            for t in tools
+        ],
     }
 
 
@@ -954,7 +979,7 @@ async def connect_mcp_server(name: str, authorization: str = Header(default=None
     """Connect/reconnect to an MCP server (admin only)."""
     require_admin(authorization)
     tools = await mcp_manager.connect_server(name)
-    return {"status": "connected", "server": name, "tools": len(tools)}
+    return {"status": "connected", "server": name, "connected": True, "tools": len(tools)}
 
 
 @app.post("/api/mcp/servers/{name}/disconnect")
@@ -962,7 +987,7 @@ async def disconnect_mcp_server(name: str, authorization: str = Header(default=N
     """Disconnect from an MCP server (admin only)."""
     require_admin(authorization)
     await mcp_manager.disconnect_server(name)
-    return {"status": "disconnected", "server": name}
+    return {"status": "disconnected", "server": name, "connected": False}
 
 
 @app.get("/api/rbac/resources")
