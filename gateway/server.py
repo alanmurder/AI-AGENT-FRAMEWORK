@@ -51,6 +51,7 @@ from harness.observability.chat_process import (
     build_tool_call_event,
     extract_skill_use_events,
     get_session_skill_infos,
+    strip_skill_use_markers,
     truncate_for_log,
 )
 
@@ -254,6 +255,40 @@ class ChatResponse(BaseModel):
     session_id: str
 
 
+def _strip_ai_message_for_persistence(msg, session_id: str, agent_id: str = ""):
+    if not hasattr(msg, "content") or getattr(msg, "type", None) != "ai":
+        return msg
+
+    content = msg.content if isinstance(msg.content, str) else str(msg.content)
+    stripped_content = strip_skill_use_markers(content, session_id=session_id, agent_id=agent_id)
+    if stripped_content == content:
+        return msg
+
+    return {
+        "timestamp": "",
+        "type": "ai",
+        "content": stripped_content,
+        "tool_calls": [
+            _tool_call_to_record(tc)
+            for tc in getattr(msg, "tool_calls", [])
+        ],
+    }
+
+
+def _tool_call_to_record(tool_call) -> dict:
+    if isinstance(tool_call, dict):
+        return {
+            "id": tool_call.get("id"),
+            "name": tool_call.get("name"),
+            "args": tool_call.get("args"),
+        }
+    return {
+        "id": getattr(tool_call, "id", None),
+        "name": getattr(tool_call, "name", None),
+        "args": getattr(tool_call, "args", None),
+    }
+
+
 @app.post("/api/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest, authorization: str = Header(default=None)):
     """REST API chat endpoint — synchronous response with lane queue serialization."""
@@ -286,8 +321,13 @@ async def chat(request: ChatRequest, authorization: str = Header(default=None)):
         response_content = ""
         for msg in result.get("messages", []):
             if hasattr(msg, "content") and msg.type == "ai":
-                response_content = msg.content
-            session_persistence.write_message(user_ctx.user_id, user_ctx.session_id, msg)
+                content = msg.content if isinstance(msg.content, str) else str(msg.content)
+                response_content = strip_skill_use_markers(content, user_ctx.session_id)
+            session_persistence.write_message(
+                user_ctx.user_id,
+                user_ctx.session_id,
+                _strip_ai_message_for_persistence(msg, user_ctx.session_id),
+            )
 
         return ChatResponse(content=response_content, session_id=user_ctx.session_id)
     finally:
@@ -712,12 +752,18 @@ async def chat_with_expert(name: str, request: ExpertChatRequest, authorization:
         )
 
         for msg in result.get("messages", []):
-            session_persistence.write_message(user_ctx.user_id, user_ctx.session_id, msg, agent_id=name)
+            session_persistence.write_message(
+                user_ctx.user_id,
+                user_ctx.session_id,
+                _strip_ai_message_for_persistence(msg, user_ctx.session_id, name),
+                agent_id=name,
+            )
 
         response_content = ""
         for msg in result.get("messages", []):
             if hasattr(msg, "content") and msg.type == "ai":
-                response_content = msg.content
+                content = msg.content if isinstance(msg.content, str) else str(msg.content)
+                response_content = strip_skill_use_markers(content, user_ctx.session_id, name)
 
         return ExpertChatResponse(content=response_content, session_id=user_ctx.session_id)
     finally:
@@ -1587,7 +1633,8 @@ async def dingtalk_callback(request: dict):
         response_content = ""
         for msg in result.get("messages", []):
             if hasattr(msg, "content") and msg.type == "ai":
-                response_content = msg.content
+                content = msg.content if isinstance(msg.content, str) else str(msg.content)
+                response_content = strip_skill_use_markers(content, user_ctx.session_id)
 
         # Send response back via DingTalk
         agent_response = AgentResponse(
@@ -1743,113 +1790,115 @@ async def ws_chat(websocket: WebSocket):
             else:
                 # ── Internal agent: LangChain stream ──
                 turn_process_events: list[dict] = []
-                turn_tool_calls: list[dict] = []
                 full_response = ""
+                final_ai_written = False
 
-                progress_event = build_progress_event(
-                    "preparing_response",
-                    "Preparing response",
-                    user_ctx,
-                    agent_id,
-                )
-                turn_process_events.append(progress_event)
-                await websocket.send_text(json.dumps(progress_event, ensure_ascii=False))
-                logger.info(
-                    "chat_progress_emitted",
-                    user_id=user_id,
-                    session_id=user_ctx.session_id,
-                    agent_id=agent_id,
-                    stage=progress_event["stage"],
-                    content=progress_event["content"],
-                )
+                try:
+                    progress_event = build_progress_event(
+                        "preparing_response",
+                        "Preparing response",
+                        user_ctx,
+                        agent_id,
+                    )
+                    turn_process_events.append(progress_event)
+                    await websocket.send_text(json.dumps(progress_event, ensure_ascii=False))
+                    logger.info(
+                        "chat_progress_emitted",
+                        user_id=user_id,
+                        session_id=user_ctx.session_id,
+                        agent_id=agent_id,
+                        stage=progress_event["stage"],
+                        content=progress_event["content"],
+                    )
 
-                session_persistence.write_message(
-                    user_ctx.user_id,
-                    user_ctx.session_id,
-                    {"timestamp": "", "type": "human", "content": user_message},
-                    agent_id=agent_id,
-                )
+                    session_persistence.write_message(
+                        user_ctx.user_id,
+                        user_ctx.session_id,
+                        {"timestamp": "", "type": "human", "content": user_message},
+                        agent_id=agent_id,
+                    )
 
-                for chunk in agent.stream(
-                    {"messages": [{"role": "user", "content": user_message}]},
-                    config={"configurable": {"context": user_ctx}},
-                    stream_mode="updates",
-                ):
-                    for node_output in chunk.values():
-                        if not node_output or not isinstance(node_output, dict):
-                            continue
-                        for msg in node_output.get("messages", []):
-                            if isinstance(msg, ToolMessage):
-                                session_persistence.write_message(user_ctx.user_id, user_ctx.session_id, msg, agent_id=agent_id)
+                    for chunk in agent.stream(
+                        {"messages": [{"role": "user", "content": user_message}]},
+                        config={"configurable": {"context": user_ctx}},
+                        stream_mode="updates",
+                    ):
+                        for node_output in chunk.values():
+                            if not node_output or not isinstance(node_output, dict):
                                 continue
+                            for msg in node_output.get("messages", []):
+                                if isinstance(msg, ToolMessage):
+                                    session_persistence.write_message(user_ctx.user_id, user_ctx.session_id, msg, agent_id=agent_id)
+                                    continue
 
-                            if getattr(msg, "type", None) == "ai" and hasattr(msg, "tool_calls") and msg.tool_calls:
-                                for tc in msg.tool_calls:
-                                    tool_call_event = build_tool_call_event(tc, user_ctx, agent_id)
-                                    await websocket.send_text(json.dumps(tool_call_event, ensure_ascii=False))
-                                    turn_tool_calls.append(tool_call_event)
-                                    turn_process_events.append(tool_call_event)
-                                    logger.info(
-                                        "chat_tool_call_emitted",
-                                        user_id=user_id,
-                                        session_id=user_ctx.session_id,
-                                        agent_id=agent_id,
-                                        tool_call_id=tool_call_event.get("id"),
-                                        name=tool_call_event.get("name"),
-                                        args=truncate_for_log(tool_call_event.get("args", {})),
+                                if getattr(msg, "type", None) == "ai" and hasattr(msg, "tool_calls") and msg.tool_calls:
+                                    session_persistence.write_message(user_ctx.user_id, user_ctx.session_id, msg, agent_id=agent_id)
+                                    for tc in msg.tool_calls:
+                                        tool_call_event = build_tool_call_event(tc, user_ctx, agent_id)
+                                        await websocket.send_text(json.dumps(tool_call_event, ensure_ascii=False))
+                                        turn_process_events.append(tool_call_event)
+                                        logger.info(
+                                            "chat_tool_call_emitted",
+                                            user_id=user_id,
+                                            session_id=user_ctx.session_id,
+                                            agent_id=agent_id,
+                                            tool_call_id=tool_call_event.get("id"),
+                                            tool_name=tool_call_event.get("name"),
+                                            args=truncate_for_log(tool_call_event.get("args", {})),
+                                        )
+
+                                if hasattr(msg, "content") and msg.content and getattr(msg, "type", None) == "ai":
+                                    content = msg.content if isinstance(msg.content, str) else str(msg.content)
+                                    visible_content, skill_events, ignored_declarations = extract_skill_use_events(
+                                        content,
+                                        session_skill_names,
+                                        user_ctx.session_id,
+                                        agent_id,
                                     )
+                                    for skill_event in skill_events:
+                                        await websocket.send_text(json.dumps(skill_event, ensure_ascii=False))
+                                        turn_process_events.append(skill_event)
+                                        logger.info(
+                                            "chat_skill_use_declared",
+                                            user_id=user_id,
+                                            session_id=user_ctx.session_id,
+                                            agent_id=agent_id,
+                                            skill_name=skill_event.get("name"),
+                                            phase=skill_event.get("phase"),
+                                            reason=truncate_for_log(skill_event.get("reason", "")),
+                                        )
+                                    for ignored in ignored_declarations:
+                                        logger.info(
+                                            "chat_skill_use_ignored",
+                                            user_id=user_id,
+                                            session_id=user_ctx.session_id,
+                                            agent_id=agent_id,
+                                            skill_name=ignored.get("name"),
+                                            phase=ignored.get("phase"),
+                                            reason=truncate_for_log(ignored.get("reason", "")),
+                                        )
 
-                            if hasattr(msg, "content") and msg.content and getattr(msg, "type", None) == "ai":
-                                content = msg.content if isinstance(msg.content, str) else str(msg.content)
-                                visible_content, skill_events, ignored_declarations = extract_skill_use_events(
-                                    content,
-                                    session_skill_names,
-                                    user_ctx.session_id,
-                                    agent_id,
-                                )
-                                for skill_event in skill_events:
-                                    await websocket.send_text(json.dumps(skill_event, ensure_ascii=False))
-                                    turn_process_events.append(skill_event)
-                                    logger.info(
-                                        "chat_skill_use_emitted",
-                                        user_id=user_id,
-                                        session_id=user_ctx.session_id,
-                                        agent_id=agent_id,
-                                        name=skill_event.get("name"),
-                                        phase=skill_event.get("phase"),
-                                        reason=skill_event.get("reason"),
-                                    )
-                                for ignored in ignored_declarations:
-                                    logger.info(
-                                        "chat_skill_use_ignored",
-                                        user_id=user_id,
-                                        session_id=user_ctx.session_id,
-                                        agent_id=agent_id,
-                                        name=ignored.get("name"),
-                                        phase=ignored.get("phase"),
-                                        reason=ignored.get("reason"),
-                                    )
-
-                                if visible_content:
-                                    full_response += visible_content
-                                    await websocket.send_text(json.dumps({
-                                        "type": "chunk",
-                                        "content": visible_content,
-                                    }, ensure_ascii=False))
-
-                session_persistence.write_message(
-                    user_ctx.user_id,
-                    user_ctx.session_id,
-                    {
-                        "timestamp": "",
-                        "type": "ai",
-                        "content": full_response,
-                        "tool_calls": turn_tool_calls,
-                        "process_events": turn_process_events,
-                    },
-                    agent_id=agent_id,
-                    process_events=turn_process_events,
-                )
+                                    if visible_content:
+                                        full_response += visible_content
+                                        await websocket.send_text(json.dumps({
+                                            "type": "chunk",
+                                            "content": visible_content,
+                                        }, ensure_ascii=False))
+                finally:
+                    if not final_ai_written:
+                        session_persistence.write_message(
+                            user_ctx.user_id,
+                            user_ctx.session_id,
+                            {
+                                "timestamp": "",
+                                "type": "ai",
+                                "content": full_response,
+                                "process_events": turn_process_events,
+                            },
+                            agent_id=agent_id,
+                            process_events=turn_process_events,
+                        )
+                        final_ai_written = True
 
             # Send completion signal
             await websocket.send_text(json.dumps({"type": "done"}, ensure_ascii=False))

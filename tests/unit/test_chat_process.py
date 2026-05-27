@@ -113,6 +113,30 @@ def test_extract_skill_use_events_keeps_malformed_marker_visible():
     assert ignored == []
 
 
+def test_strip_skill_use_markers_removes_well_formed_markers():
+    from harness.observability.chat_process import strip_skill_use_markers
+
+    visible = strip_skill_use_markers(
+        'Before [skill_use name="knowledge_search" phase="answering" reason="Need product docs"] after',
+        session_id="sess-1",
+        agent_id="agent-1",
+    )
+
+    assert visible == "Before  after"
+
+
+def test_strip_skill_use_markers_leaves_malformed_markers_visible():
+    from harness.observability.chat_process import strip_skill_use_markers
+
+    visible = strip_skill_use_markers(
+        'Keep [skill_use name="knowledge_search" phase=answering] text',
+        session_id="sess-1",
+        agent_id="agent-1",
+    )
+
+    assert visible == 'Keep [skill_use name="knowledge_search" phase=answering] text'
+
+
 def test_truncate_for_log_limits_nested_values():
     from harness.observability.chat_process import truncate_for_log
 

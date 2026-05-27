@@ -109,6 +109,16 @@ def extract_skill_use_events(
     return "".join(visible_parts), accepted_events, ignored_declarations
 
 
+def strip_skill_use_markers(content: str, session_id: str = "", agent_id: str = "") -> str:
+    visible_content, _events, _ignored = extract_skill_use_events(
+        content,
+        available_skill_names=set(),
+        session_id=session_id,
+        agent_id=agent_id,
+    )
+    return visible_content
+
+
 def truncate_for_log(value: Any, max_length: int = 500) -> Any:
     if isinstance(value, str):
         if len(value) <= max_length:
